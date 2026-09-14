@@ -61,7 +61,7 @@ for part_i in range(n_partition):
     emmc.seek(SECTOR * start_sector)
     with open(os.path.join(dst_dir, devname), "wb") as outfile:
         for i in range(sector_count):
-            tweak = (start_sector + i // SECTOR).to_bytes(16, "little")
+            tweak = (start_sector + i).to_bytes(16, "little")
             dec = Cipher(algorithms.AES(key), modes.XTS(tweak)).decryptor()
             sector = dec.update(emmc.read(SECTOR)) + dec.finalize()
             outfile.write(sector)
