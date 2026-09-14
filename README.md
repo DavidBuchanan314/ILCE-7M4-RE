@@ -38,9 +38,10 @@ f7000000-f737ffff : ctrlreg
   4006d0000-400783fff : Kernel data
 ```
 
-Things not labeled in iomem:
+Things not labeled in iomem (see also [drivers/udif/mach-cxd900xx/platform.c](https://github.com/DavidBuchanan314/Sony-ILCE-7M4-Linux/blob/main/linux-kernel/drivers/udif/mach-cxd900xx/platform.c))
 ```
 start        end          description
+0_f10d_6000  0_f10e_0fff  eMMC/MMC
 0_f138_8000  0_????_????  SCU / syscon
 0_f7fc_0000  0_????_????  SPACC (crypto engine)
 0_fe00_0000  0_feff_ffff  eSRAM
