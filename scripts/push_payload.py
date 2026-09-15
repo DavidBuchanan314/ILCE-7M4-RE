@@ -33,7 +33,6 @@ class Evt(enum.IntEnum):
 
 VERSION = b"uart_boot 1"
 
-UNLOCK_WORD = 0x2CF25621
 LOAD_ADDR = 0xFE020000
 MAX_RECORD_PAYLOAD = 512  # true max is 4086, but this keeps progress chunking smooth
 
@@ -43,19 +42,33 @@ RECORD_GAP = 0.0144
 
 def record(rtype, value, payload=b""):
     body = struct.pack("<IHI", 10 + len(payload), rtype, value) + payload
-    return body + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
+    return body + struct.pack("<I", zlib.crc32(body))
 
 
-def boot_script(payload, addr=LOAD_ADDR, entry=None):
+def boot_script(payload, addr=LOAD_ADDR, entry=None, unlock_code=None):
     if entry is None:
         entry = addr
-    recs = [record(0x0000, UNLOCK_WORD)]
+
+    recs = []
+    recs.append(record(0x0123, 0))  # empty write command, used as end marker
+
     for off in range(0, len(payload), MAX_RECORD_PAYLOAD):
         recs.append(record(0x0001, addr + off, payload[off:off + MAX_RECORD_PAYLOAD]))
-    recs += [
-        record(0xFFFF, entry),
-        record(0x0000, UNLOCK_WORD),
-    ]
+
+    if unlock_code is None:  # unlock bypass exploit
+        unlock_code = 0xdeadbeef
+        stack_addr = 0xfe02f398
+
+        # use the write command to replace the expected value, stored on the stack
+        # this requires a bootrom-specific offset (which may vary depending on the boot mode)
+        val = unlock_code.to_bytes(4, "little")
+        val += (zlib.crc32(val) ^ 0xffffffff).to_bytes(4, "little")
+        recs.append(record(0x0001, stack_addr, val))
+
+    recs.append(record(0xFFFF, entry))  # set entrypoint
+    recs.append(record(0x0000, unlock_code))  # send unlock code
+    recs.append(record(0x0123, 0))  # end marker
+    
     return recs
 
 
@@ -171,6 +184,7 @@ def main():
     ap.add_argument("-p", "--port", default="/dev/ttyACM0")
     ap.add_argument("-a", "--addr", type=lambda s: int(s, 0), default=LOAD_ADDR)
     ap.add_argument("-e", "--entry", type=lambda s: int(s, 0), default=None)
+    ap.add_argument("-u", "--unlock-code", type=lambda s: int(s, 0), default=None)  # 0x2CF25621 for A7IV
     ap.add_argument("-b", "--baud", type=int, default=115200)
     ap.add_argument("--no-forward", action="store_true")
     ap.add_argument("--log")
@@ -180,7 +194,7 @@ def main():
         payload = f.read()
 
     entry = args.addr if args.entry is None else args.entry
-    records = boot_script(payload, args.addr, entry)
+    records = boot_script(payload, args.addr, entry, args.unlock_code)
     total = sum(len(r) for r in records)
 
     dev = Device(args.port)
