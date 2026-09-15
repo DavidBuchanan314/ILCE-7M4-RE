@@ -69,6 +69,7 @@
 /* Normal Interrupt Status */
 #define SDHCI_INT_CMD_COMPLETE  BIT(0)
 #define SDHCI_INT_XFER_COMPLETE BIT(1)
+#define SDHCI_INT_BUF_WRITE_RDY BIT(4)
 #define SDHCI_INT_BUF_READ_RDY  BIT(5)
 #define SDHCI_INT_ERROR         BIT(15)
 
@@ -90,9 +91,33 @@
 #define SDHCI_MAKE_CMD(idx, f)  (u16)(((idx) << 8) | (f))
 
 /* MMC command indices */
-#define MMC_CMD_SWITCH              6
+#define MMC_CMD_SWITCH               6
+#define MMC_CMD_STOP_TRANSMISSION   12
+#define MMC_CMD_SEND_STATUS         13
 #define MMC_CMD_READ_SINGLE_BLOCK   17
 #define MMC_CMD_READ_MULTIPLE_BLOCK 18
+#define MMC_CMD_WRITE_BLOCK         24
+#define MMC_CMD_WRITE_MULTIPLE_BLOCK 25
+
+/*
+ * R1 card status, as returned by CMD13 SEND_STATUS and by every R1 command.
+ *
+ * A write is the first operation here whose failure the controller may not
+ * report: the host sees Transfer Complete as soon as the last block is on the
+ * bus, and the card then programs it privately. Anything that goes wrong
+ * during programming -- a write-protected boot partition, an out-of-range
+ * address -- surfaces only as an error bit in the NEXT status response. So the
+ * write path polls CMD13 and checks these rather than trusting the interrupt.
+ *
+ * ERROR_MASK is every sticky error bit in the status word: 31..26 address and
+ * erase faults plus WP_VIOLATION, 24 lock/unlock, 23..19 CRC/illegal/ECC/CC/
+ * internal, 16 CID-CSD overwrite, 15 WP erase skip, 7 switch error.
+ */
+#define MMC_R1_ERROR_MASK           0xFDF98080u
+#define MMC_R1_WP_VIOLATION         BIT(26)
+#define MMC_R1_READY_FOR_DATA       BIT(8)
+#define MMC_R1_STATE(r)             (((r) >> 9) & 0xf)
+#define MMC_STATE_TRAN              4
 
 /*
  * EXT_CSD[179] PARTITION_CONFIG, low 3 bits = PARTITION_ACCESS:
@@ -122,10 +147,16 @@ enum mmc_status {
     MMC_ERR_CMD_ERROR   = -3,   /* controller raised Error Int  */
     MMC_ERR_DATA_TIMEOUT= -4,   /* no Buffer Read Ready         */
     MMC_ERR_XFER        = -5,   /* no Transfer Complete         */
+    MMC_ERR_WRITE_TIMEOUT= -6,  /* no Buffer Write Ready        */
+    MMC_ERR_CARD_STATUS = -7,   /* card reported an R1 error    */
+    MMC_ERR_RANGE       = -8,   /* write would leave the target */
 };
 
 /* Last Error Interrupt Status seen, for diagnostics. */
 extern u16 mmc_last_error;
+
+/* Last R1 card status seen by mmc_wait_ready(), for diagnostics. */
+extern u32 mmc_last_r1;
 
 /*
  * Issue one raw command and hand back the 48-bit response. Exposed so the
@@ -155,5 +186,15 @@ int mmc_select_partition(u32 access);
 
 /* Read `nblocks` 512-byte blocks starting at `start_block` into `buf`. */
 int mmc_read_blocks(u32 start_block, void *buf, u32 nblocks);
+
+/* Write `nblocks` 512-byte blocks from `buf` starting at `start_block`. */
+int mmc_write_blocks(u32 start_block, const void *buf, u32 nblocks);
+
+/*
+ * Poll CMD13 until the card leaves the programming state and reports
+ * READY_FOR_DATA. Returns MMC_ERR_CARD_STATUS if the status word carries any
+ * error bit; the word itself is left in mmc_last_r1.
+ */
+int mmc_wait_ready(void);
 
 #endif /* FASTBOOT_SDHCI_H */

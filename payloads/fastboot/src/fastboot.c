@@ -526,6 +526,368 @@ static void cmd_upload(void)
     fb_okay("");
 }
 
+/*
+ * Report an eMMC failure with everything needed to tell the causes apart: the
+ * driver's own return code, the controller's Error Interrupt Status, and the
+ * card's R1 status. The last one is the only place a write-protect violation
+ * ever appears, so it is called out by name rather than left to be decoded
+ * from a hex word.
+ */
+static void flash_fail(const char *what, int rc)
+{
+    char line[FB_RESPONSE_MAX];
+    u32 n = 0;
+
+    if (rc == MMC_ERR_RANGE) {
+        fb_fail("write would run past the end of the partition");
+        return;
+    }
+
+    if (rc == MMC_ERR_CARD_STATUS && (mmc_last_r1 & MMC_R1_WP_VIOLATION))
+        fb_info("card reports a write protect violation");
+
+    n += str_copy(line + n, what, 16);
+    n += str_copy(line + n, " failed rc ", 16);
+    n += hex_format(line + n, (u32)rc, 2);
+    n += str_copy(line + n, " err ", 8);
+    n += hex_format(line + n, mmc_last_error, 4);
+    n += str_copy(line + n, " r1 ", 8);
+    n += hex_format(line + n, mmc_last_r1, 8);
+    line[n] = 0;
+    fb_fail(line);
+}
+
+/* ---- flash -------------------------------------------------------------- */
+
+/* Same 64 KiB granule as the dump path, for the same reason: it keeps any one
+ * eMMC command's busy window short without costing round trips. */
+#define FLASH_CHUNK_SECTORS  DUMP_CHUNK_SECTORS
+
+/*
+ * Sparse image format, as produced by libsparse.
+ *
+ * Supporting it is not optional for anything large. The host will not send
+ * more than max-download-size in one transfer, so it converts any bigger image
+ * -- including a plain raw one -- into a series of sparse images each under
+ * that limit, and sends them as separate download/flash pairs. Every split
+ * describes the whole output space: the ones after the first open with a
+ * DONT_CARE chunk spanning everything already written, and that is the only
+ * thing that puts the write cursor back where it belongs. No offset is
+ * communicated any other way.
+ */
+#define SPARSE_MAGIC                0xed26ff3au
+#define SPARSE_HEADER_SIZE          28
+#define SPARSE_CHUNK_HEADER_SIZE    12
+
+#define SPARSE_CHUNK_RAW            0xcac1
+#define SPARSE_CHUNK_FILL           0xcac2
+#define SPARSE_CHUNK_DONT_CARE      0xcac3
+#define SPARSE_CHUNK_CRC32          0xcac4
+
+static u16 le16(const u8 *p)
+{
+    return (u16)((u32)p[0] | ((u32)p[1] << 8));
+}
+
+/* Scratch for expanding FILL chunks; one write granule's worth. */
+static u8 fill_buf[FLASH_CHUNK_SECTORS * SECTOR_SIZE] DMA_SECTION;
+
+/* Where the current flash is going, resolved before any data is written. */
+static struct {
+    u32 dev;
+    u32 start;
+    u32 sectors;
+} flash_dst;
+
+/* Sectors actually put on the card by this command; skipped ones do not
+ * count, which is what makes the reported total meaningful for a sparse
+ * image. */
+static u32 flash_written;
+
+/*
+ * Write `n` sectors at sector `off` within the resolved target.
+ *
+ * Bounds are checked here rather than in the callers so that every path --
+ * raw image, sparse RAW chunk, sparse FILL -- is covered by the same test.
+ */
+static int flash_sectors(u32 off, const u8 *src, u32 n)
+{
+    if (off > flash_dst.sectors || n > flash_dst.sectors - off)
+        return MMC_ERR_RANGE;
+
+    flash_written += n;
+
+    while (n) {
+        u32 chunk = n > FLASH_CHUNK_SECTORS ? FLASH_CHUNK_SECTORS : n;
+        int rc = mmc_write_blocks(flash_dst.start + off, src, chunk);
+
+        if (rc != MMC_OK)
+            return rc;
+        off += chunk;
+        n   -= chunk;
+        src += chunk * SECTOR_SIZE;
+    }
+    return MMC_OK;
+}
+
+/* Same, from a repeated 32-bit pattern rather than from a buffer. */
+static int flash_fill(u32 off, u32 n, u32 word)
+{
+    u32 *p = (u32 *)fill_buf;
+    u32 i;
+
+    for (i = 0; i < sizeof(fill_buf) / 4; i++)
+        p[i] = word;
+
+    while (n) {
+        u32 chunk = n > FLASH_CHUNK_SECTORS ? FLASH_CHUNK_SECTORS : n;
+        int rc = flash_sectors(off, fill_buf, chunk);
+
+        if (rc != MMC_OK)
+            return rc;
+        off += chunk;
+        n   -= chunk;
+    }
+    return MMC_OK;
+}
+
+/*
+ * Walk one sparse image, writing it to the resolved target.
+ *
+ * Two kinds of failure, told apart by `*err`: a malformed image sets it to a
+ * message and returns -1, while an eMMC failure leaves it null and returns the
+ * driver's status, which the caller reports with rc/err/r1.
+ */
+static int flash_sparse(const u8 *img, u32 len, const char **err)
+{
+    u32 hdr_sz, chunk_hdr_sz, blk_sz, total_blks, total_chunks;
+    u32 spb, off, sector = 0, i;
+
+    *err = 0;
+
+    if (len < SPARSE_HEADER_SIZE) {
+        *err = "sparse image truncated";
+        return -1;
+    }
+    if (le16(img + 4) != 1) {
+        *err = "unsupported sparse major version";
+        return -1;
+    }
+
+    hdr_sz       = le16(img + 8);
+    chunk_hdr_sz = le16(img + 10);
+    blk_sz       = le32(img + 12);
+    total_blks   = le32(img + 16);
+    total_chunks = le32(img + 20);
+
+    /*
+     * The header sizes must be multiples of 4, not merely large enough. With
+     * the MMU off every access is Device-nGnRnE, where an unaligned load
+     * faults -- and a RAW chunk's payload is written straight out of this
+     * buffer by a driver that reads it 32 bits at a time. An odd header size
+     * would put that payload off alignment and hang the payload with no output
+     * at all. The values libsparse writes (28 and 12) are both fine; this is
+     * about what a malformed image could do.
+     */
+    if (hdr_sz < SPARSE_HEADER_SIZE || (hdr_sz & 3) ||
+        chunk_hdr_sz < SPARSE_CHUNK_HEADER_SIZE || (chunk_hdr_sz & 3)) {
+        *err = "bad sparse header size";
+        return -1;
+    }
+    if (blk_sz == 0 || (blk_sz % SECTOR_SIZE)) {
+        *err = "sparse block size is not a multiple of 512";
+        return -1;
+    }
+
+    spb = blk_sz / SECTOR_SIZE;
+
+    /*
+     * Every split of a resparsed image carries the whole image's block count,
+     * so an oversized image is rejected on the first split rather than part
+     * way through being written.
+     */
+    if (total_blks > flash_dst.sectors / spb) {
+        *err = "image is larger than the partition";
+        return -1;
+    }
+
+    off = hdr_sz;
+
+    for (i = 0; i < total_chunks; i++) {
+        u32 type, chunk_blks, total_sz, data_len, nsec;
+        const u8 *data;
+        int rc;
+
+        if (off > len || chunk_hdr_sz > len - off) {
+            *err = "sparse chunk header truncated";
+            return -1;
+        }
+
+        type       = le16(img + off);
+        chunk_blks = le32(img + off + 4);
+        total_sz   = le32(img + off + 8);
+
+        if (total_sz < chunk_hdr_sz || total_sz > len - off) {
+            *err = "bad sparse chunk size";
+            return -1;
+        }
+
+        data     = img + off + chunk_hdr_sz;
+        data_len = total_sz - chunk_hdr_sz;
+
+        /* Convert blocks to sectors only after checking it cannot wrap. */
+        if (chunk_blks > 0xffffffffu / spb) {
+            *err = "sparse chunk too large";
+            return -1;
+        }
+        nsec = chunk_blks * spb;
+        if (nsec > 0xffffffffu - sector) {
+            *err = "sparse image overruns the address space";
+            return -1;
+        }
+
+        switch (type) {
+        case SPARSE_CHUNK_RAW:
+            /* Divide rather than multiply: nsec * SECTOR_SIZE could wrap. */
+            if ((data_len % SECTOR_SIZE) || data_len / SECTOR_SIZE != nsec) {
+                *err = "raw chunk size disagrees with its block count";
+                return -1;
+            }
+            rc = flash_sectors(sector, data, nsec);
+            if (rc != MMC_OK)
+                return rc;
+            break;
+
+        case SPARSE_CHUNK_FILL:
+            if (data_len != 4) {
+                *err = "fill chunk payload is not 4 bytes";
+                return -1;
+            }
+            rc = flash_fill(sector, nsec, le32(data));
+            if (rc != MMC_OK)
+                return rc;
+            break;
+
+        case SPARSE_CHUNK_DONT_CARE:
+            if (data_len != 0) {
+                *err = "skip chunk carries data";
+                return -1;
+            }
+            break;              /* leave those sectors as they are */
+
+        case SPARSE_CHUNK_CRC32:
+            break;              /* whole-image checksum; nothing to write */
+
+        default:
+            *err = "unknown sparse chunk type";
+            return -1;
+        }
+
+        sector += nsec;
+        off += total_sz;
+    }
+
+    return MMC_OK;
+}
+
+/*
+ * `fastboot flash <name>` -- write the staged download to a partition.
+ *
+ * Takes either a raw image, which goes to sector 0 of the partition, or a
+ * sparse one, which places itself. Which it is is decided by the magic, since
+ * the host converts to sparse on its own initiative whenever an image is too
+ * big to send in one download.
+ */
+static void cmd_flash(const char *name)
+{
+    char line[FB_RESPONSE_MAX];
+    const char *err = 0;
+    u32 dev = 0, start = 0, sectors = 0, nsec, n;
+    int rc;
+
+    if (download_len == 0) {
+        fb_fail("nothing staged; download first");
+        return;
+    }
+
+    if (!mmc_ready)
+        mmc_init();
+    if (!mmc_ready) {
+        fb_fail("eMMC not ready (try: oem partition)");
+        return;
+    }
+
+    rc = resolve_part(name, &dev, &start, &sectors);
+    if (rc != 0) {
+        n = str_copy(line, "cannot resolve ", FB_RESPONSE_MAX);
+        n += str_copy(line + n, name, 24);
+        line[n] = 0;
+        fb_fail(line);
+        return;
+    }
+
+    flash_dst.dev     = dev;
+    flash_dst.start   = start;
+    flash_dst.sectors = sectors;
+    flash_written     = 0;
+
+    rc = mmc_select_partition(dev);
+    if (rc != MMC_OK) {
+        flash_fail("select", rc);
+        return;
+    }
+
+    /*
+     * The magic alone decides, not the magic plus a plausible length. An image
+     * that starts with it and is then too short to parse is a truncated sparse
+     * image, and writing its header to the card as though it were data is the
+     * one outcome worth ruling out.
+     */
+    if (download_len >= 4 && le32(download_buf) == SPARSE_MAGIC) {
+        rc = flash_sparse(download_buf, download_len, &err);
+        if (err) {
+            fb_fail(err);
+            return;
+        }
+    } else {
+        /* Round up: the download is a byte count, the card only takes
+         * sectors. */
+        nsec = (download_len + SECTOR_SIZE - 1) / SECTOR_SIZE;
+        if (nsec > sectors) {
+            n = str_copy(line, "image is ", FB_RESPONSE_MAX);
+            n += dec_format(line + n, nsec);
+            n += str_copy(line + n, " sectors, partition holds ", 32);
+            n += dec_format(line + n, sectors);
+            line[n] = 0;
+            fb_fail(line);
+            return;
+        }
+
+        /*
+         * Zero the slack in the final sector. Without this the tail of an
+         * image whose size is not a multiple of 512 would be padded with
+         * whatever the previous download left there -- the buffer is never
+         * cleared between commands.
+         */
+        for (n = download_len; n < nsec * SECTOR_SIZE; n++)
+            download_buf[n] = 0;
+
+        rc = flash_sectors(0, download_buf, nsec);
+    }
+
+    if (rc != MMC_OK) {
+        flash_fail("write", rc);
+        return;
+    }
+
+    n = str_copy(line, "wrote ", FB_RESPONSE_MAX);
+    n += dec_format(line + n, flash_written);
+    n += str_copy(line + n, " sectors to ", 16);
+    n += str_copy(line + n, name, 24);
+    line[n] = 0;
+    fb_result(line);
+}
+
 static void cmd_partition(void)
 {
     char name[16];
@@ -809,7 +1171,7 @@ static void cmd_getvar(const char *name)
     u32 n;
 
     if (str_eq(name, "version")) {
-        fb_okay("0.4");
+        fb_okay("0.5");
     } else if (str_eq(name, "product")) {
         fb_okay("ILCE-7M4");
     } else if (str_eq(name, "serialno")) {
@@ -873,6 +1235,8 @@ static void fastboot_command(const char *cmd)
         cmd_download(rest);
     } else if ((rest = str_after(cmd, "oem ")) != 0) {
         cmd_oem(rest);
+    } else if ((rest = str_after(cmd, "flash:")) != 0) {
+        cmd_flash(rest);
     } else if (str_eq(cmd, "upload")) {
         cmd_upload();
     } else if (str_eq(cmd, "reboot") || str_eq(cmd, "reboot-bootloader")) {
@@ -886,8 +1250,6 @@ static void fastboot_command(const char *cmd)
 
 void fastboot_loop(void)
 {
-    (void)download_len;
-
     for (;;) {
         u32 n;
 
