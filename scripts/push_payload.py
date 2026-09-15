@@ -16,8 +16,9 @@ import zlib
 import serial
 from tqdm import tqdm
 
+# rp2040 protocol details
 
-class Cmd(enum.IntEnum):
+class RpCmd(enum.IntEnum):
     PING    = 0x01
     RESET   = 0x02
     CARRIER = 0x03
@@ -26,12 +27,29 @@ class Cmd(enum.IntEnum):
     UART    = 0x06
 
 
-class Evt(enum.IntEnum):
+class RpEvt(enum.IntEnum):
     ACK  = 0x81
     ERR  = 0x82
     UART = 0x83
 
-VERSION = b"uart_boot 1"
+RP_VERSION = b"uart_boot 1"
+
+# bootrom serial boot protocol
+
+class SerCmd(enum.IntEnum):
+    """
+    Anything that isn't 0 or ffff is interpreted as a memory write command
+
+    A session is ended by re-sending the first command
+
+    We send END_MARKER first, as a dummy write with empty payload, so
+    it can be later used as an end command.
+    """
+
+    SET_UNLOCK = 0x0000
+    MEM_WRITE  = 0x0001
+    END_MARKER = 0x0123
+    SET_ENTRY  = 0xffff
 
 LOAD_ADDR = 0xFE020000
 MAX_RECORD_PAYLOAD = 512  # true max is 4086, but this keeps progress chunking smooth
@@ -40,7 +58,7 @@ TRANSMIT_START = 0.5
 RECORD_GAP = 0.0144
 
 
-def record(rtype, value, payload=b""):
+def record(rtype: SerCmd, value: int, payload=b""):
     body = struct.pack("<IHI", 10 + len(payload), rtype, value) + payload
     return body + struct.pack("<I", zlib.crc32(body))
 
@@ -50,10 +68,14 @@ def boot_script(payload, addr=LOAD_ADDR, entry=None, unlock_code=None):
         entry = addr
 
     recs = []
-    recs.append(record(0x0123, 0))  # empty write command, used as end marker
+    recs.append(record(SerCmd.END_MARKER, 0))  # empty write command, used as end marker
 
     for off in range(0, len(payload), MAX_RECORD_PAYLOAD):
-        recs.append(record(0x0001, addr + off, payload[off:off + MAX_RECORD_PAYLOAD]))
+        recs.append(record(
+            SerCmd.MEM_WRITE,
+            addr + off,
+            payload[off:off + MAX_RECORD_PAYLOAD],
+        ))
 
     if unlock_code is None:  # unlock bypass exploit
         unlock_code = 0xdeadbeef
@@ -63,11 +85,12 @@ def boot_script(payload, addr=LOAD_ADDR, entry=None, unlock_code=None):
         # this requires a bootrom-specific offset (which may vary depending on the boot mode)
         val = unlock_code.to_bytes(4, "little")
         val += (zlib.crc32(val) ^ 0xffffffff).to_bytes(4, "little")
-        recs.append(record(0x0001, stack_addr, val))
 
-    recs.append(record(0xFFFF, entry))  # set entrypoint
-    recs.append(record(0x0000, unlock_code))  # send unlock code
-    recs.append(record(0x0123, 0))  # end marker
+        recs.append(record(SerCmd.MEM_WRITE, stack_addr, val))
+
+    recs.append(record(SerCmd.SET_ENTRY, entry))
+    recs.append(record(SerCmd.SET_UNLOCK, unlock_code))
+    recs.append(record(SerCmd.END_MARKER, 0))
     
     return recs
 
@@ -83,7 +106,7 @@ class Device:
     def close(self):
         self.ser.close()
 
-    def send(self, cmd, data=b""):
+    def send(self, cmd: RpCmd, data=b""):
         self.ser.write(bytes([cmd]) + struct.pack("<H", len(data)) + data)
 
     def _read_exact(self, n):
@@ -103,7 +126,7 @@ class Device:
         data = self._read_exact(n) if n else b""
         if data is None:
             return None
-        return Evt(hdr[0]), data
+        return RpEvt(hdr[0]), data
 
     def ack(self):
         while True:
@@ -111,34 +134,34 @@ class Device:
             if pkt is None:
                 raise Error("timed out waiting for the device")
             evt, data = pkt
-            if evt == Evt.ACK:
+            if evt == RpEvt.ACK:
                 return data
-            if evt == Evt.ERR:
+            if evt == RpEvt.ERR:
                 raise Error(data)
-            if evt == Evt.UART:
+            if evt == RpEvt.UART:
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()
 
     def ping(self):
-        self.send(Cmd.PING)
+        self.send(RpCmd.PING)
         ver = self.ack()
-        if ver != VERSION:
+        if ver != RP_VERSION:
             raise Exception(f"bad version: {ver}")
 
     def reset(self):
-        self.send(Cmd.RESET)
+        self.send(RpCmd.RESET)
         self.ack()
 
     def carrier(self, on):
-        self.send(Cmd.CARRIER, bytes([1 if on else 0]))
+        self.send(RpCmd.CARRIER, bytes([1 if on else 0]))
         self.ack()
 
     def blob(self, rec):
-        self.send(Cmd.BLOB, rec)
+        self.send(RpCmd.BLOB, rec)
         self.ack()
 
     def baud(self, baud):
-        self.send(Cmd.BAUD, struct.pack("<I", baud))
+        self.send(RpCmd.BAUD, struct.pack("<I", baud))
         self.ack()
 
 
@@ -156,13 +179,13 @@ def forward(dev, log=None):
                 pkt = dev.recv()
                 if pkt is not None:
                     evt, data = pkt
-                    if evt == Evt.UART:
+                    if evt == RpEvt.UART:
                         sys.stdout.buffer.write(data)
                         sys.stdout.buffer.flush()
                         if log:
                             log.write(data)
                             log.flush()
-                    elif evt == Evt.ERR:
+                    elif evt == RpEvt.ERR:
                         msg = data.decode("utf-8", "replace")
                         print(f"\r\n[dev] error: {msg}\r\n", end="", file=sys.stderr)
 
@@ -172,7 +195,7 @@ def forward(dev, log=None):
                     break
                 if stdin_tty and b"\x03" in data:
                     break
-                dev.send(Cmd.UART, data)
+                dev.send(RpCmd.UART, data)
     finally:
         if saved is not None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved)
