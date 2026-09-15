@@ -12,7 +12,13 @@
  *
  * We split that 128 KiB window in half:
  *   0xFE020000..0xFE030000  code, rodata, data, bss, stack
- *   0xFE030000..0xFE130000  USB DMA arena (event buffer, TRBs, download buffer)
+ *   0xFE100000..0xFE200000  USB DMA arena (event buffer, TRBs, download buffer)
+ *
+ * The arena deliberately does NOT start at 0xFE030000. The mask ROM keeps its
+ * eMMC device state in 16 bytes at 0xFE030008 (written by 0xFFFF3188, read
+ * back by the flash reader at 0xFFFF2DDC), which landed squarely inside our
+ * 4 KB USB event buffer. Any call into the ROM's eMMC code would have
+ * corrupted USB events in flight.
  *
  * The arena runs past the 0xFE040000 mark that the eMMC loader would normally
  * be staged at. That is fine here: this payload replaced the loader, so
@@ -29,7 +35,7 @@ ENTRY(_start)
 MEMORY
 {
     ESRAM (rwx) : ORIGIN = 0xFE020000, LENGTH = 64K
-    USBDMA (rw) : ORIGIN = 0xFE030000, LENGTH = 1M
+    USBDMA (rw) : ORIGIN = 0xFE100000, LENGTH = 1M
 }
 
 STACK_SIZE = 8K;

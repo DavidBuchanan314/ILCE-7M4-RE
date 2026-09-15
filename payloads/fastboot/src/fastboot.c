@@ -2,6 +2,7 @@
 #include "usb.h"
 #include "io.h"
 #include "led.h"
+#include "sdhci.h"
 
 /*
  * Fastboot protocol.
@@ -218,6 +219,315 @@ static void cmd_poke(const char *args)
     fb_result(line);
 }
 
+/* ---- oem partition ------------------------------------------------------ */
+
+#define SECTOR_SIZE         512
+/*
+ * The SDM2 table starts at byte 32 with 16 bytes per entry. Four sectors holds
+ * 126 entries, comfortably more than the ~23 this device uses, and costs one
+ * read either way.
+ */
+#define PT_SECTORS          4
+#define PT_MAX_ENTRIES      ((PT_SECTORS * SECTOR_SIZE - 32) / 16)
+
+/*
+ * eMMC boot partition size. The hardware answer is EXT_CSD[226] BOOT_SIZE_MULT
+ * x 128 KiB, but the ROM exposes no way to read EXT_CSD, so this is the
+ * observed size of the nflashaB0 dump (4 MiB = 0x2000 sectors). Boot0 and
+ * boot1 are always the same size as each other.
+ */
+#define BOOT_PART_SECTORS   0x2000
+
+static u8 pt_buf[PT_SECTORS * SECTOR_SIZE] DMA_SECTION;
+
+static u32 le32(const u8 *p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+static u32 dec_format(char *dst, u32 v)
+{
+    char tmp[12];
+    u32 n = 0, i = 0;
+
+    if (v == 0) {
+        dst[0] = '0';
+        return 1;
+    }
+    while (v) {
+        tmp[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (n)
+        dst[i++] = tmp[--n];
+    return i;
+}
+
+/* "<name>  <start8>  <count8>  <type>", one INFO line per partition. */
+static void pt_line(const char *name, u32 start, u32 count, const char *type)
+{
+    char line[FB_RESPONSE_MAX];
+    u32 n = 0;
+
+    n += str_copy(line + n, name, 16);
+    while (n < 11)
+        line[n++] = ' ';
+    n += hex_format(line + n, start, 8);
+    line[n++] = ' ';
+    n += hex_format(line + n, count, 8);
+    line[n++] = ' ';
+    n += str_copy(line + n, type, 8);
+    line[n] = 0;
+    fb_info(line);
+}
+
+/*
+ * Column header. Written as its own function rather than by passing zeros
+ * through pt_line(), which printed the start/count headings as "00000000".
+ * The padding targets match pt_line's layout exactly: name at 0, start at 11,
+ * count at 20, type at 29.
+ */
+static void pt_header(void)
+{
+    char line[FB_RESPONSE_MAX];
+    u32 n = 0;
+
+    n += str_copy(line + n, "device", 16);
+    while (n < 11)
+        line[n++] = ' ';
+    n += str_copy(line + n, "start", 8);
+    while (n < 20)
+        line[n++] = ' ';
+    n += str_copy(line + n, "count", 8);
+    while (n < 29)
+        line[n++] = ' ';
+    n += str_copy(line + n, "type", 8);
+    line[n] = 0;
+    fb_info(line);
+}
+
+static const char *pt_typename(u32 type)
+{
+    switch (type) {
+    case 4: return "ext2";
+    case 5: return "fat";
+    case 6: return "wbi2";
+    }
+    return "?";
+}
+
+static void cmd_partition(const char *args)
+{
+    char name[16];
+    char line[FB_RESPONSE_MAX];
+    u32 n_part, i, shown = 0, extent = 0, n, dev = 0;
+    int rc, init_rc = 0;
+
+    /* `oem partition:<dev>` overrides the PARTITION_ACCESS value, so the
+     * selector can be experimented with without a rebuild -- 0 user area,
+     * 1 boot0, 2 boot1, 0xFF leave whatever is currently selected. */
+    if (args && *args)
+        dev = (u32)hex_parse(args, 0);
+
+    pt_header();
+
+    /*
+     * The two eMMC boot hardware partitions. They are not in the SDM2 table --
+     * that table describes the user area only -- so they are listed from what
+     * the hardware layout guarantees: each starts at its own sector 0.
+     */
+    pt_line("nflashaB0", 0, BOOT_PART_SECTORS, "raw");
+    pt_line("nflashaB1", 0, BOOT_PART_SECTORS, "raw");
+
+    /* SDM2 table: sector 0 of the user area. */
+    /* Startup init may have failed (card asleep, powered late). Retry now
+     * rather than reporting a stale failure. */
+    if (!mmc_ready)
+        init_rc = mmc_init();
+
+    if (!mmc_ready) {
+        /*
+         * Identification is the failure, so report what mmc_init() knows --
+         * which step died, the OCR it got, the controller error. Without this
+         * the message below would say only that the read failed, discarding
+         * the part that actually says why. mmc_init_step: 1 CMD0, 2 CMD1,
+         * 3 CMD2, 4 CMD3, 5 CMD7, 6 BUS_WIDTH, 7 HS_TIMING.
+         */
+        n = str_copy(line, "mmc init rc ", FB_RESPONSE_MAX);
+        n += hex_format(line + n, (u32)init_rc, 2);
+        n += str_copy(line + n, " step ", 8);
+        n += dec_format(line + n, mmc_init_step);
+        n += str_copy(line + n, " err ", 8);
+        n += hex_format(line + n, mmc_last_error, 4);
+        n += str_copy(line + n, " ocr ", 8);
+        n += hex_format(line + n, mmc_ocr, 8);
+        line[n] = 0;
+        fb_fail(line);
+        return;
+    }
+
+    rc = mmc_select_partition(dev);
+    if (rc == MMC_OK)
+        rc = mmc_read_blocks(0, pt_buf, PT_SECTORS);
+    dsb();
+
+    if (rc != MMC_OK || pt_buf[0] != '8' || pt_buf[1] != '2' ||
+        pt_buf[2] != '4' || pt_buf[3] != '6') {
+        n = str_copy(line, "dev ", FB_RESPONSE_MAX);
+        n += hex_format(line + n, dev, 2);
+        n += str_copy(line + n, " rc ", 8);
+        n += hex_format(line + n, (u32)rc, 2);
+        n += str_copy(line + n, " err ", 8);
+        n += hex_format(line + n, mmc_last_error, 4);
+        n += str_copy(line + n, " magic ", 8);
+        n += hex_format(line + n, le32(pt_buf), 8);
+        line[n] = 0;
+        fb_fail(line);
+        return;
+    }
+
+    n_part = le32(pt_buf + 8);
+    if (n_part > PT_MAX_ENTRIES)
+        n_part = PT_MAX_ENTRIES;
+
+    /*
+     * The bare "nflasha" device is the whole user area -- the raw disk the
+     * dump script reads, before any partition is carved out of it.
+     *
+     * Its true size is EXT_CSD[212] SEC_COUNT, which the ROM gives us no way
+     * to read, so what is printed is the extent the partition table actually
+     * covers: the highest start+count over valid entries. That is a lower
+     * bound on the device size, not the device size, and the summary line says
+     * so rather than letting the number be mistaken for the real capacity.
+     */
+    for (i = 0; i < n_part; i++) {
+        const u8 *e = pt_buf + 32 + i * 16;
+        u32 end;
+
+        if (!(le32(e + 12) & 1))
+            continue;
+        end = le32(e) + le32(e + 4);
+        if (end > extent)
+            extent = end;
+    }
+    pt_line("nflasha", 0, extent, "raw");
+
+    for (i = 0; i < n_part; i++) {
+        const u8 *e = pt_buf + 32 + i * 16;
+        u32 start = le32(e);
+        u32 count = le32(e + 4);
+        u32 type  = le32(e + 8);
+        u32 flag  = le32(e + 12);
+
+        /* SDM_LABEL_VALID. Invalid entries are skipped but still consume an
+         * index, because the device name is derived from the slot, not from
+         * the position in the printed list. */
+        if (!(flag & 1))
+            continue;
+
+        n = str_copy(name, "nflasha", sizeof(name));
+        n += dec_format(name + n, i + 1);   /* 1-indexed, as the dump script does */
+        name[n] = 0;
+
+        pt_line(name, start, count, pt_typename(type));
+        shown++;
+    }
+
+    n = dec_format(line, shown);
+    n += str_copy(line + n, " of ", 8);
+    n += dec_format(line + n, le32(pt_buf + 8));
+    n += str_copy(line + n, " slots; nflasha count = table extent", 40);
+    line[n] = 0;
+    fb_result(line);
+}
+
+/*
+ * `oem mmccmd:<idx>:<arg>[:<flags>]` -- issue one raw eMMC command.
+ *
+ * Flags default to a 48-bit response with CRC and index checking (R1). Pass
+ * them explicitly for other response types: 0 none, 3 R1b, 1 long/R2.
+ * Reports the controller return code, the Error Interrupt Status, the R1
+ * response and the card state decoded out of it.
+ */
+static void cmd_mmccmd(const char *args)
+{
+    const char *p;
+    char line[FB_RESPONSE_MAX];
+    u32 idx, arg = 0, resp = 0, n = 0;
+    u16 flags = SDHCI_CMD_RESP_SHORT | SDHCI_CMD_CRC_CHECK |
+                SDHCI_CMD_INDEX_CHECK;
+    int rc;
+
+    idx = (u32)hex_parse(args, &p);
+    if (*p == ':')
+        arg = (u32)hex_parse(p + 1, &p);
+    if (*p == ':')
+        flags = (u16)hex_parse(p + 1, 0);
+
+    rc = mmc_raw_cmd((u8)idx, arg, flags, &resp);
+
+    n = str_copy(line, "cmd ", FB_RESPONSE_MAX);
+    n += dec_format(line + n, idx);
+    n += str_copy(line + n, " rc ", 8);
+    n += hex_format(line + n, (u32)rc, 2);
+    n += str_copy(line + n, " err ", 8);
+    n += hex_format(line + n, mmc_last_error, 4);
+    n += str_copy(line + n, " resp ", 8);
+    n += hex_format(line + n, resp, 8);
+    line[n] = 0;
+    fb_info(line);
+
+    /* R1 bits [12:9] are CURRENT_STATE: 0 idle, 1 ready, 2 ident, 3 stby,
+     * 4 tran, 5 data, 6 rcv, 7 prg, 8 dis. */
+    n = str_copy(line, "state ", FB_RESPONSE_MAX);
+    n += dec_format(line + n, (resp >> 9) & 0xf);
+    line[n] = 0;
+    fb_result(line);
+}
+
+/*
+ * `oem mmcinit` -- run the mask ROM's own eMMC bring-up.
+ *
+ * The card answers CMD0 and CMD1 but no addressed command, i.e. it is powered
+ * but never went through identification on this boot path -- so BOOT.md's
+ * "the payload inherits eMMC fully initialised" does not hold when the ROM is
+ * diverted this early. Rather than reimplement identification, call the ROM's:
+ *
+ *   0xFFFF3108 -> 0xFFFF24F4(w0=5, w1=2, w2=0x10000, w3=2,
+ *                            x4=0, w5=0, x6=scratch, w7=0x10)
+ *
+ * w2 = 0x10000 is the RCA the ROM assigns, i.e. card address 1. The scratch
+ * buffer is the ROM's own at 0xFE0138E8; the routine also mirrors 16 bytes of
+ * device state to 0xFE030008, which is why the DMA arena was moved away from
+ * that address (see fastboot.ld).
+ */
+#define ROM_EMMC_INIT       0xFFFF24F4ull
+#define ROM_EMMC_SCRATCH    0xFE0138E8ull
+
+static void cmd_mmcinit(void)
+{
+    u32 (*rom_init)(u32, u32, u32, u32, u64, u32, u64, u32) =
+        (u32 (*)(u32, u32, u32, u32, u64, u32, u64, u32))
+        (unsigned long)ROM_EMMC_INIT;
+    char line[FB_RESPONSE_MAX];
+    u32 rc, n = 0;
+
+    (void)rom_init;
+
+    rc = (u32)mmc_init();
+
+    n = str_copy(line, "rc ", FB_RESPONSE_MAX);
+    n += hex_format(line + n, rc, 2);
+    n += str_copy(line + n, " step ", 8);
+    n += dec_format(line + n, mmc_init_step);
+    n += str_copy(line + n, " err ", 8);
+    n += hex_format(line + n, mmc_last_error, 4);
+    n += str_copy(line + n, " ocr ", 8);
+    n += hex_format(line + n, mmc_ocr, 8);
+    line[n] = 0;
+    fb_result(line);
+}
+
 /* ---- oem exec ----------------------------------------------------------- */
 
 /*
@@ -297,6 +607,9 @@ static void cmd_help(void)
     fb_info("peek:<addr>[:<len>]  dump memory, max len 0x1000");
     fb_info("poke:<addr>:<val>    32-bit write, reports readback");
     fb_info("exec:<addr>          call addr, reports return value");
+    fb_info("partition[:<dev>]    list eMMC partitions");
+    fb_info("mmccmd:<i>:<a>[:<f>] raw eMMC command");
+    fb_info("mmcinit              run ROM eMMC bring-up");
 
     n = str_copy(line, "download buffer ", FB_RESPONSE_MAX);
     n += hex_format(line + n, (u64)(unsigned long)download_buf, 8);
@@ -326,6 +639,22 @@ static void cmd_oem(const char *args)
     }
     if ((rest = str_after(args, "exec:")) != 0) {
         cmd_exec(rest);
+        return;
+    }
+    if ((rest = str_after(args, "mmccmd:")) != 0) {
+        cmd_mmccmd(rest);
+        return;
+    }
+    if (str_eq(args, "mmcinit")) {
+        cmd_mmcinit();
+        return;
+    }
+    if (str_eq(args, "partition")) {
+        cmd_partition(0);
+        return;
+    }
+    if ((rest = str_after(args, "partition:")) != 0) {
+        cmd_partition(rest);
         return;
     }
     fb_fail("unknown oem command (try: oem help)");

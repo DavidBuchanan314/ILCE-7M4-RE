@@ -19,6 +19,18 @@ static inline u32 read32(u64 addr)
     return *(volatile u32 *)addr;
 }
 
+/*
+ * SDHCI has 8-, 16- and 32-bit registers and several of them must be accessed
+ * at their natural width -- writing a 16-bit register as part of a 32-bit
+ * access can trigger the neighbouring register's side effects. The Command
+ * register at 0x0E is the obvious trap: a 32-bit write to 0x0C would issue the
+ * command before Transfer Mode has settled.
+ */
+static inline void write16(u64 addr, u16 val) { *(volatile u16 *)addr = val; }
+static inline u16  read16(u64 addr)           { return *(volatile u16 *)addr; }
+static inline void write8(u64 addr, u8 val)   { *(volatile u8 *)addr = val; }
+static inline u8   read8(u64 addr)            { return *(volatile u8 *)addr; }
+
 static inline void setbits32(u64 addr, u32 mask)
 {
     write32(addr, read32(addr) | mask);

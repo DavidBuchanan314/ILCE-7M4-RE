@@ -4,6 +4,7 @@
 #include "usb_phy.h"
 #include "dwc3.h"
 #include "usb.h"
+#include "sdhci.h"
 
 /*
  * Milestone: get the D+ pullup up, and report precisely how far we got.
@@ -44,6 +45,17 @@ int main(void)
     led_init();
     timer_init();
     led_selftest();
+
+    /*
+     * Bring the eMMC up before USB. It is quick when it works (a handful of
+     * commands, tens of milliseconds) and doing it here means the card is
+     * ready by the time any command arrives.
+     *
+     * A failure is deliberately NOT fatal: USB is the more important of the
+     * two, and losing it would also lose the channel needed to diagnose the
+     * eMMC. `oem mmcinit` retries, and eMMC commands retry on demand.
+     */
+    mmc_init();
 
     usb_phy_init();
 
