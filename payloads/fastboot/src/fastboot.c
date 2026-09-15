@@ -530,7 +530,7 @@ static void cmd_partition(void)
 {
     char name[16];
     char line[FB_RESPONSE_MAX];
-    u32 n_part, i, shown = 0, extent = 0, n;
+    u32 n_part, i, extent = 0, n;
     int rc, init_rc = 0;
 
     pt_header();
@@ -634,15 +634,9 @@ static void cmd_partition(void)
         name[n] = 0;
 
         pt_line(name, start, count, pt_typename(type));
-        shown++;
     }
 
-    n = dec_format(line, shown);
-    n += str_copy(line + n, " of ", 8);
-    n += dec_format(line + n, le32(pt_buf + 8));
-    n += str_copy(line + n, " slots; nflasha count = table extent", 40);
-    line[n] = 0;
-    fb_result(line);
+    fb_okay("");
 }
 
 /*
@@ -685,49 +679,6 @@ static void cmd_mmccmd(const char *args)
      * 4 tran, 5 data, 6 rcv, 7 prg, 8 dis. */
     n = str_copy(line, "state ", FB_RESPONSE_MAX);
     n += dec_format(line + n, (resp >> 9) & 0xf);
-    line[n] = 0;
-    fb_result(line);
-}
-
-/*
- * `oem mmcinit` -- run the mask ROM's own eMMC bring-up.
- *
- * The card answers CMD0 and CMD1 but no addressed command, i.e. it is powered
- * but never went through identification on this boot path -- so BOOT.md's
- * "the payload inherits eMMC fully initialised" does not hold when the ROM is
- * diverted this early. Rather than reimplement identification, call the ROM's:
- *
- *   0xFFFF3108 -> 0xFFFF24F4(w0=5, w1=2, w2=0x10000, w3=2,
- *                            x4=0, w5=0, x6=scratch, w7=0x10)
- *
- * w2 = 0x10000 is the RCA the ROM assigns, i.e. card address 1. The scratch
- * buffer is the ROM's own at 0xFE0138E8; the routine also mirrors 16 bytes of
- * device state to 0xFE030008, which is why the DMA arena was moved away from
- * that address (see fastboot.ld).
- */
-#define ROM_EMMC_INIT       0xFFFF24F4ull
-#define ROM_EMMC_SCRATCH    0xFE0138E8ull
-
-static void cmd_mmcinit(void)
-{
-    u32 (*rom_init)(u32, u32, u32, u32, u64, u32, u64, u32) =
-        (u32 (*)(u32, u32, u32, u32, u64, u32, u64, u32))
-        (unsigned long)ROM_EMMC_INIT;
-    char line[FB_RESPONSE_MAX];
-    u32 rc, n = 0;
-
-    (void)rom_init;
-
-    rc = (u32)mmc_init();
-
-    n = str_copy(line, "rc ", FB_RESPONSE_MAX);
-    n += hex_format(line + n, rc, 2);
-    n += str_copy(line + n, " step ", 8);
-    n += dec_format(line + n, mmc_init_step);
-    n += str_copy(line + n, " err ", 8);
-    n += hex_format(line + n, mmc_last_error, 4);
-    n += str_copy(line + n, " ocr ", 8);
-    n += hex_format(line + n, mmc_ocr, 8);
     line[n] = 0;
     fb_result(line);
 }
@@ -804,9 +755,6 @@ static void cmd_exec(const char *args)
 
 static void cmd_help(void)
 {
-    char line[FB_RESPONSE_MAX];
-    u32 n;
-
     fb_info("help                 list oem commands");
     fb_info("peek:<addr>[:<len>]  dump memory, max len 0x1000");
     fb_info("poke:<addr>:<val>    32-bit write, reports readback");
@@ -814,14 +762,6 @@ static void cmd_help(void)
     fb_info("partition            list eMMC partitions");
     fb_info("partition dump <name> [<off> [<sz>]]");
     fb_info("mmccmd:<i>:<a>[:<f>] raw eMMC command");
-    fb_info("mmcinit              run ROM eMMC bring-up");
-
-    n = str_copy(line, "download buffer ", FB_RESPONSE_MAX);
-    n += hex_format(line + n, (u64)(unsigned long)download_buf, 8);
-    n += str_copy(line + n, " len ", FB_RESPONSE_MAX - n);
-    n += hex_format(line + n, DOWNLOAD_MAX, 8);
-    line[n] = 0;
-    fb_info(line);
 
     fb_okay("");
 }
@@ -848,10 +788,6 @@ static void cmd_oem(const char *args)
     }
     if ((rest = str_after(args, "mmccmd:")) != 0) {
         cmd_mmccmd(rest);
-        return;
-    }
-    if (str_eq(args, "mmcinit")) {
-        cmd_mmcinit();
         return;
     }
     if ((rest = str_after(args, "partition dump ")) != 0) {
