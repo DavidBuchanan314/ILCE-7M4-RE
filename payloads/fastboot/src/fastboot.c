@@ -316,18 +316,222 @@ static const char *pt_typename(u32 type)
     return "?";
 }
 
-static void cmd_partition(const char *args)
+/*
+ * Armed streaming source for `upload`. Nothing is buffered: `oem partition
+ * dump` only records what to send, and the upload streams straight off the
+ * eMMC a chunk at a time. That is what removes the size limit -- a 681 MB
+ * partition needs no more memory than a 4 MB one.
+ */
+static struct {
+    u32 dev;            /* eMMC PARTITION_ACCESS */
+    u32 start;          /* absolute start sector */
+    u32 sectors;        /* how many to send */
+} upload_src;
+
+#define DUMP_CHUNK_SECTORS  (64 * 1024 / SECTOR_SIZE)   /* 64 KiB per read */
+
+/* Copy the next whitespace-delimited token, returning where it stopped. */
+static const char *parse_token(const char *s, char *out, u32 max)
+{
+    u32 n = 0;
+
+    while (*s == ' ')
+        s++;
+    while (*s && *s != ' ' && n + 1 < max)
+        out[n++] = *s++;
+    out[n] = 0;
+    return s;
+}
+
+/* Read the SDM2 table into pt_buf. Returns MMC_OK, or a negative error. */
+static int pt_load(void)
+{
+    int rc;
+
+    if (!mmc_ready)
+        mmc_init();
+    if (!mmc_ready)
+        return MMC_ERR_CMD_TIMEOUT;
+
+    rc = mmc_select_partition(0);
+    if (rc == MMC_OK)
+        rc = mmc_read_blocks(0, pt_buf, PT_SECTORS);
+    if (rc != MMC_OK)
+        return rc;
+
+    dsb();
+    if (pt_buf[0] != '8' || pt_buf[1] != '2' ||
+        pt_buf[2] != '4' || pt_buf[3] != '6')
+        return MMC_ERR_XFER;
+    return MMC_OK;
+}
+
+/*
+ * Resolve a device name from the listing to (dev, start, sectors).
+ *
+ *   nflashaB0 / nflashaB1  the eMMC boot hardware partitions (dev 1 / 2)
+ *   nflasha                the whole user area, sized by the table's extent
+ *   nflashaN               slot N of the SDM2 table, 1-indexed as the dump
+ *                          script names them
+ */
+static int resolve_part(const char *name, u32 *dev, u32 *start, u32 *sectors)
+{
+    const char *tail = str_after(name, "nflasha");
+    u32 want, i, n_part, extent = 0;
+    int rc;
+
+    if (!tail)
+        return -1;
+
+    if (str_eq(tail, "B0")) {
+        *dev = 1; *start = 0; *sectors = BOOT_PART_SECTORS;
+        return 0;
+    }
+    if (str_eq(tail, "B1")) {
+        *dev = 2; *start = 0; *sectors = BOOT_PART_SECTORS;
+        return 0;
+    }
+
+    rc = pt_load();
+    if (rc != MMC_OK)
+        return rc;
+
+    n_part = le32(pt_buf + 8);
+    if (n_part > PT_MAX_ENTRIES)
+        n_part = PT_MAX_ENTRIES;
+
+    if (*tail == 0) {                   /* bare "nflasha": whole user area */
+        for (i = 0; i < n_part; i++) {
+            const u8 *e = pt_buf + 32 + i * 16;
+            u32 end;
+
+            if (!(le32(e + 12) & 1))
+                continue;
+            end = le32(e) + le32(e + 4);
+            if (end > extent)
+                extent = end;
+        }
+        *dev = 0; *start = 0; *sectors = extent;
+        return 0;
+    }
+
+    /* nflashaN -- decimal slot number. */
+    want = 0;
+    while (*tail >= '0' && *tail <= '9')
+        want = want * 10 + (u32)(*tail++ - '0');
+    if (*tail != 0 || want == 0 || want > n_part)
+        return -1;
+
+    {
+        const u8 *e = pt_buf + 32 + (want - 1) * 16;
+
+        if (!(le32(e + 12) & 1))
+            return -1;                  /* slot exists but is not valid */
+        *dev = 0;
+        *start = le32(e);
+        *sectors = le32(e + 4);
+    }
+    return 0;
+}
+
+/* `oem partition dump <name> [<offset> [<size>]]`, offset/size in hex sectors. */
+static void cmd_partition_dump(const char *args)
+{
+    char name[24], line[FB_RESPONSE_MAX];
+    const char *p;
+    u32 dev = 0, start = 0, sectors = 0, offset = 0, want, n;
+    int rc;
+
+    p = parse_token(args, name, sizeof(name));
+    if (name[0] == 0) {
+        fb_fail("usage: oem partition dump <name> [<off> [<size>]]");
+        return;
+    }
+
+    rc = resolve_part(name, &dev, &start, &sectors);
+    if (rc != 0) {
+        n = str_copy(line, "cannot resolve ", FB_RESPONSE_MAX);
+        n += str_copy(line + n, name, 24);
+        line[n] = 0;
+        fb_fail(line);
+        return;
+    }
+
+    while (*p == ' ')
+        p++;
+    if (*p)
+        offset = (u32)hex_parse(p, &p);
+    while (*p == ' ')
+        p++;
+    want = *p ? (u32)hex_parse(p, 0) : (sectors > offset ? sectors - offset : 0);
+
+    if (offset >= sectors || want == 0) {
+        fb_fail("offset past end of partition");
+        return;
+    }
+    if (want > sectors - offset)
+        want = sectors - offset;
+
+    upload_src.dev = dev;
+    upload_src.start = start + offset;
+    upload_src.sectors = want;
+
+    /* The arming is silent; the only thing worth saying is what to run next. */
+    n = str_copy(line, "hint: fastboot get_staged ", FB_RESPONSE_MAX);
+    n += str_copy(line + n, name, sizeof(name));
+    n += str_copy(line + n, ".bin", 8);
+    line[n] = 0;
+    fb_result(line);
+}
+
+/*
+ * `upload` -- what `fastboot get_staged` issues.
+ *
+ * Announce the total with DATA<8hex>, then stream it. The host only cares that
+ * exactly that many bytes arrive, so they can be produced incrementally.
+ */
+static void cmd_upload(void)
+{
+    char line[16];
+    u32 done = 0, n;
+
+    if (upload_src.sectors == 0) {
+        fb_fail("nothing armed (try: oem partition dump <name>)");
+        return;
+    }
+
+    n = str_copy(line, "DATA", 4);
+    n += hex_format(line + n, upload_src.sectors * SECTOR_SIZE, 8);
+    usb_bulk_send(line, n);
+
+    if (mmc_select_partition(upload_src.dev) != MMC_OK) {
+        /* Too late for FAIL: the host is already reading the data phase. */
+        return;
+    }
+
+    while (done < upload_src.sectors) {
+        u32 chunk = upload_src.sectors - done;
+
+        if (chunk > DUMP_CHUNK_SECTORS)
+            chunk = DUMP_CHUNK_SECTORS;
+
+        if (mmc_read_blocks(upload_src.start + done, download_buf,
+                            chunk) != MMC_OK)
+            return;
+
+        usb_bulk_send(download_buf, chunk * SECTOR_SIZE);
+        done += chunk;
+    }
+
+    fb_okay("");
+}
+
+static void cmd_partition(void)
 {
     char name[16];
     char line[FB_RESPONSE_MAX];
-    u32 n_part, i, shown = 0, extent = 0, n, dev = 0;
+    u32 n_part, i, shown = 0, extent = 0, n;
     int rc, init_rc = 0;
-
-    /* `oem partition:<dev>` overrides the PARTITION_ACCESS value, so the
-     * selector can be experimented with without a rebuild -- 0 user area,
-     * 1 boot0, 2 boot1, 0xFF leave whatever is currently selected. */
-    if (args && *args)
-        dev = (u32)hex_parse(args, 0);
 
     pt_header();
 
@@ -366,16 +570,16 @@ static void cmd_partition(const char *args)
         return;
     }
 
-    rc = mmc_select_partition(dev);
+    /* The SDM2 table exists only in the user area -- boot0 holds the EXBL
+     * Information Sector and boot1 is blank -- so there is nothing to select. */
+    rc = mmc_select_partition(0);
     if (rc == MMC_OK)
         rc = mmc_read_blocks(0, pt_buf, PT_SECTORS);
     dsb();
 
     if (rc != MMC_OK || pt_buf[0] != '8' || pt_buf[1] != '2' ||
         pt_buf[2] != '4' || pt_buf[3] != '6') {
-        n = str_copy(line, "dev ", FB_RESPONSE_MAX);
-        n += hex_format(line + n, dev, 2);
-        n += str_copy(line + n, " rc ", 8);
+        n = str_copy(line, "rc ", FB_RESPONSE_MAX);
         n += hex_format(line + n, (u32)rc, 2);
         n += str_copy(line + n, " err ", 8);
         n += hex_format(line + n, mmc_last_error, 4);
@@ -607,7 +811,8 @@ static void cmd_help(void)
     fb_info("peek:<addr>[:<len>]  dump memory, max len 0x1000");
     fb_info("poke:<addr>:<val>    32-bit write, reports readback");
     fb_info("exec:<addr>          call addr, reports return value");
-    fb_info("partition[:<dev>]    list eMMC partitions");
+    fb_info("partition            list eMMC partitions");
+    fb_info("partition dump <name> [<off> [<sz>]]");
     fb_info("mmccmd:<i>:<a>[:<f>] raw eMMC command");
     fb_info("mmcinit              run ROM eMMC bring-up");
 
@@ -649,12 +854,12 @@ static void cmd_oem(const char *args)
         cmd_mmcinit();
         return;
     }
-    if (str_eq(args, "partition")) {
-        cmd_partition(0);
+    if ((rest = str_after(args, "partition dump ")) != 0) {
+        cmd_partition_dump(rest);
         return;
     }
-    if ((rest = str_after(args, "partition:")) != 0) {
-        cmd_partition(rest);
+    if (str_eq(args, "partition")) {
+        cmd_partition();
         return;
     }
     fb_fail("unknown oem command (try: oem help)");
@@ -732,6 +937,8 @@ static void fastboot_command(const char *cmd)
         cmd_download(rest);
     } else if ((rest = str_after(cmd, "oem ")) != 0) {
         cmd_oem(rest);
+    } else if (str_eq(cmd, "upload")) {
+        cmd_upload();
     } else if (str_eq(cmd, "reboot") || str_eq(cmd, "reboot-bootloader")) {
         /* Nothing sane to reboot into from a bootrom payload; answer so the
          * host does not hang waiting. */
