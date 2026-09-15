@@ -337,11 +337,20 @@ static const char *pt_typename(u32 type)
  * eMMC a chunk at a time. That is what removes the size limit -- a 681 MB
  * partition needs no more memory than a 4 MB one.
  */
+enum upload_kind {
+    UPLOAD_NONE = 0,
+    UPLOAD_MMC,         /* stream off the card   */
+    UPLOAD_MEM,         /* stream out of memory  */
+};
+
 static struct {
-    u32 dev;            /* eMMC PARTITION_ACCESS */
-    u32 start;          /* absolute start sector */
-    u32 sectors;        /* how many to send */
-    int decrypt;        /* unwrap the partition AES-XTS on the way out */
+    int kind;
+    u32 dev;            /* MMC: eMMC PARTITION_ACCESS */
+    u32 start;          /* MMC: absolute start sector */
+    u32 sectors;        /* MMC: how many to send      */
+    int decrypt;        /* MMC: unwrap the partition AES-XTS on the way out */
+    u64 addr;           /* MEM: source address        */
+    u32 len;            /* MEM: byte count            */
 } upload_src;
 
 #define DUMP_CHUNK_SECTORS  (64 * 1024 / SECTOR_SIZE)   /* 64 KiB per read */
@@ -505,6 +514,7 @@ static void cmd_partition_dump(const char *args)
     if (want > sectors - offset)
         want = sectors - offset;
 
+    upload_src.kind = UPLOAD_MMC;
     upload_src.dev = dev;
     upload_src.start = start + offset;
     upload_src.sectors = want;
@@ -529,8 +539,42 @@ static void cmd_upload(void)
     char line[16];
     u32 done = 0, n;
 
-    if (upload_src.sectors == 0) {
+    if (upload_src.kind == UPLOAD_NONE) {
         fb_fail("nothing armed (try: oem partition dump <name>)");
+        return;
+    }
+
+    if (upload_src.kind == UPLOAD_MEM) {
+        n = str_copy(line, "DATA", 4);
+        n += hex_format(line + n, upload_src.len, 8);
+        usb_bulk_send(line, n);
+
+        /*
+         * Staged through download_buf rather than sent straight from the
+         * source. The USB controller's own AXI master would have to reach the
+         * ROM window for a direct send to work, and there is no reason to
+         * assume it can; the copy costs nothing at this size and only ever
+         * touches memory the DMA arena already covers.
+         *
+         * 32-bit loads throughout: with the MMU off these are Device-nGnRnE,
+         * where an unaligned access faults.
+         */
+        while (done < upload_src.len) {
+            u32 chunk = upload_src.len - done;
+            u32 *out = (u32 *)download_buf;
+            u32 i;
+
+            if (chunk > DUMP_CHUNK_SECTORS * SECTOR_SIZE)
+                chunk = DUMP_CHUNK_SECTORS * SECTOR_SIZE;
+
+            for (i = 0; i < chunk; i += 4)
+                *out++ = read32(upload_src.addr + done + i);
+
+            usb_bulk_send(download_buf, chunk);
+            done += chunk;
+        }
+
+        fb_okay("");
         return;
     }
 
@@ -1163,6 +1207,28 @@ static void cmd_exec(const char *args)
     fb_result(line);
 }
 
+/* ---- oem dumpbrom ------------------------------------------------------- */
+
+/*
+ * `fastboot oem dumpbrom` -- stage the mask ROM for `get_staged`.
+ *
+ * 0xFFFF0000..0xFFFFBFFF, the window the memory map gives for the BootROM.
+ * Nothing locks it out from here: the payload runs at EL3, and `oem peek`
+ * already reads the same region a word at a time. This just makes taking the
+ * whole thing one command instead of 3072 of them.
+ */
+#define BROM_BASE   0xFFFF0000ull
+#define BROM_SIZE   0xC000
+
+static void cmd_dumpbrom(void)
+{
+    upload_src.kind = UPLOAD_MEM;
+    upload_src.addr = BROM_BASE;
+    upload_src.len  = BROM_SIZE;
+
+    fb_result("hint: fastboot get_staged brom.bin");
+}
+
 /* ---- oem help ----------------------------------------------------------- */
 
 static void cmd_help(void)
@@ -1173,6 +1239,7 @@ static void cmd_help(void)
     fb_info("exec:<addr>          call addr, reports return value");
     fb_info("partition            list eMMC partitions");
     fb_info("partition dump <name> [<off> [<sz>]]");
+    fb_info("dumpbrom             stage the bootrom for get_staged");
 
     fb_okay("");
 }
@@ -1203,6 +1270,10 @@ static void cmd_oem(const char *args)
     }
     if (str_eq(args, "partition")) {
         cmd_partition();
+        return;
+    }
+    if (str_eq(args, "dumpbrom")) {
+        cmd_dumpbrom();
         return;
     }
     fb_fail("unknown oem command (try: oem help)");

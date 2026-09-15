@@ -1,6 +1,14 @@
 # ILCE-7M4-RE
 RE notes for ILCE-7M4, aka Sony A7 IV mirrorless camera
 
+## Serial Boot Protocol
+
+The AP bootrom has a secret (or not so secret) serial boot mode, which you can reach by blasting the right bits down the RX pin shortly after reset. On cameras with a "multi" connector (like the A7IV), the pinout is as follows:
+
+[TODO]
+
+
+
 ## Memory Map (Main AP)
 
 Linux `/proc/iomem`:
