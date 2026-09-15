@@ -12,5 +12,4 @@ $ fastboot oem help
 (bootloader) exec:<addr>          call addr, reports return value
 (bootloader) partition            list eMMC partitions
 (bootloader) partition dump <name> [<off> [<sz>]]
-(bootloader) mmccmd:<i>:<a>[:<f>] raw eMMC command
 ```

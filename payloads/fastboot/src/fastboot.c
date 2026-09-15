@@ -1095,50 +1095,6 @@ static void cmd_partition(void)
     fb_okay("");
 }
 
-/*
- * `oem mmccmd:<idx>:<arg>[:<flags>]` -- issue one raw eMMC command.
- *
- * Flags default to a 48-bit response with CRC and index checking (R1). Pass
- * them explicitly for other response types: 0 none, 3 R1b, 1 long/R2.
- * Reports the controller return code, the Error Interrupt Status, the R1
- * response and the card state decoded out of it.
- */
-static void cmd_mmccmd(const char *args)
-{
-    const char *p;
-    char line[FB_RESPONSE_MAX];
-    u32 idx, arg = 0, resp = 0, n = 0;
-    u16 flags = SDHCI_CMD_RESP_SHORT | SDHCI_CMD_CRC_CHECK |
-                SDHCI_CMD_INDEX_CHECK;
-    int rc;
-
-    idx = (u32)hex_parse(args, &p);
-    if (*p == ':')
-        arg = (u32)hex_parse(p + 1, &p);
-    if (*p == ':')
-        flags = (u16)hex_parse(p + 1, 0);
-
-    rc = mmc_raw_cmd((u8)idx, arg, flags, &resp);
-
-    n = str_copy(line, "cmd ", FB_RESPONSE_MAX);
-    n += dec_format(line + n, idx);
-    n += str_copy(line + n, " rc ", 8);
-    n += hex_format(line + n, (u32)rc, 2);
-    n += str_copy(line + n, " err ", 8);
-    n += hex_format(line + n, mmc_last_error, 4);
-    n += str_copy(line + n, " resp ", 8);
-    n += hex_format(line + n, resp, 8);
-    line[n] = 0;
-    fb_info(line);
-
-    /* R1 bits [12:9] are CURRENT_STATE: 0 idle, 1 ready, 2 ident, 3 stby,
-     * 4 tran, 5 data, 6 rcv, 7 prg, 8 dis. */
-    n = str_copy(line, "state ", FB_RESPONSE_MAX);
-    n += dec_format(line + n, (resp >> 9) & 0xf);
-    line[n] = 0;
-    fb_result(line);
-}
-
 /* ---- oem exec ----------------------------------------------------------- */
 
 /*
@@ -1217,7 +1173,6 @@ static void cmd_help(void)
     fb_info("exec:<addr>          call addr, reports return value");
     fb_info("partition            list eMMC partitions");
     fb_info("partition dump <name> [<off> [<sz>]]");
-    fb_info("mmccmd:<i>:<a>[:<f>] raw eMMC command");
 
     fb_okay("");
 }
@@ -1240,10 +1195,6 @@ static void cmd_oem(const char *args)
     }
     if ((rest = str_after(args, "exec:")) != 0) {
         cmd_exec(rest);
-        return;
-    }
-    if ((rest = str_after(args, "mmccmd:")) != 0) {
-        cmd_mmccmd(rest);
         return;
     }
     if ((rest = str_after(args, "partition dump ")) != 0) {
