@@ -3,6 +3,7 @@
 #include "io.h"
 #include "led.h"
 #include "sdhci.h"
+#include "spacc.h"
 
 /*
  * Fastboot protocol.
@@ -81,6 +82,20 @@ static u32 hex_format(char *dst, u64 value, int digits)
     for (i = digits - 1; i >= 0; i--) {
         dst[digits - 1 - i] = hexdigits[(value >> (i * 4)) & 0xf];
     }
+    return (u32)digits;
+}
+
+/* Hex with no leading zeros, so a size reads as 0x400000 rather than
+ * 0x0000000000400000. */
+static u32 hex_format_min(char *dst, u64 value)
+{
+    int digits = 1, i;
+    u64 t = value;
+
+    while (t >>= 4)
+        digits++;
+    for (i = 0; i < digits; i++)
+        dst[i] = hexdigits[(value >> ((digits - 1 - i) * 4)) & 0xf];
     return (u32)digits;
 }
 
@@ -326,6 +341,7 @@ static struct {
     u32 dev;            /* eMMC PARTITION_ACCESS */
     u32 start;          /* absolute start sector */
     u32 sectors;        /* how many to send */
+    int decrypt;        /* unwrap the partition AES-XTS on the way out */
 } upload_src;
 
 #define DUMP_CHUNK_SECTORS  (64 * 1024 / SECTOR_SIZE)   /* 64 KiB per read */
@@ -374,11 +390,15 @@ static int pt_load(void)
  *   nflashaN               slot N of the SDM2 table, 1-indexed as the dump
  *                          script names them
  */
-static int resolve_part(const char *name, u32 *dev, u32 *start, u32 *sectors)
+static int resolve_part(const char *name, u32 *dev, u32 *start, u32 *sectors,
+                        int *encrypted)
 {
     const char *tail = str_after(name, "nflasha");
     u32 want, i, n_part, extent = 0;
     int rc;
+
+    if (encrypted)
+        *encrypted = 0;
 
     if (!tail)
         return -1;
@@ -430,17 +450,30 @@ static int resolve_part(const char *name, u32 *dev, u32 *start, u32 *sectors)
         *dev = 0;
         *start = le32(e);
         *sectors = le32(e + 4);
+        /*
+         * Only the SDM2 slots carry the partition AES-XTS. The boot hardware
+         * partitions use a different key entirely, and bare "nflasha" spans
+         * the plaintext partition table as well as the encrypted slots, so
+         * neither can be transparently decrypted.
+         */
+        if (encrypted)
+            *encrypted = 1;
     }
     return 0;
 }
 
-/* `oem partition dump <name> [<offset> [<size>]]`, offset/size in hex sectors. */
+/*
+ * `oem partition dump <name> [<offset> [<size>]]`, offset/size in hex sectors.
+ *
+ * An SDM2 slot is decrypted on the way out; everything else is handed back as
+ * it is stored.
+ */
 static void cmd_partition_dump(const char *args)
 {
     char name[24], line[FB_RESPONSE_MAX];
     const char *p;
     u32 dev = 0, start = 0, sectors = 0, offset = 0, want, n;
-    int rc;
+    int rc, encrypted = 0;
 
     p = parse_token(args, name, sizeof(name));
     if (name[0] == 0) {
@@ -448,7 +481,7 @@ static void cmd_partition_dump(const char *args)
         return;
     }
 
-    rc = resolve_part(name, &dev, &start, &sectors);
+    rc = resolve_part(name, &dev, &start, &sectors, &encrypted);
     if (rc != 0) {
         n = str_copy(line, "cannot resolve ", FB_RESPONSE_MAX);
         n += str_copy(line + n, name, 24);
@@ -475,6 +508,7 @@ static void cmd_partition_dump(const char *args)
     upload_src.dev = dev;
     upload_src.start = start + offset;
     upload_src.sectors = want;
+    upload_src.decrypt = encrypted;
 
     /* The arming is silent; the only thing worth saying is what to run next. */
     n = str_copy(line, "hint: fastboot get_staged ", FB_RESPONSE_MAX);
@@ -519,12 +553,35 @@ static void cmd_upload(void)
                             chunk) != MMC_OK)
             return;
 
+        /*
+         * XTS restarts its tweak every sector, so this is necessarily one
+         * crypto job per sector -- contiguity buys nothing. The tweak is the
+         * ABSOLUTE sector number, not an offset within the partition, which
+         * is why upload_src.start is added back in.
+         */
+        if (upload_src.decrypt) {
+            u32 i;
+
+            for (i = 0; i < chunk; i++) {
+                u8 *sec = download_buf + i * SECTOR_SIZE;
+
+                if (spacc_xts_sector(sec, sec, upload_src.start + done + i,
+                                     0) != SPACC_OK)
+                    return;     /* mid data phase; too late to FAIL */
+            }
+        }
+
         usb_bulk_send(download_buf, chunk * SECTOR_SIZE);
         done += chunk;
     }
 
     fb_okay("");
 }
+
+/* Crypto failure during a flash. Not an eMMC condition, but it travels the
+ * same return path, so it gets a code that cannot collide with enum
+ * mmc_status. */
+#define FLASH_ERR_CRYPTO    (-20)
 
 /*
  * Report an eMMC failure with everything needed to tell the causes apart: the
@@ -537,6 +594,11 @@ static void flash_fail(const char *what, int rc)
 {
     char line[FB_RESPONSE_MAX];
     u32 n = 0;
+
+    if (rc == FLASH_ERR_CRYPTO) {
+        fb_fail("crypto engine failed");
+        return;
+    }
 
     if (rc == MMC_ERR_RANGE) {
         fb_fail("write would run past the end of the partition");
@@ -592,11 +654,23 @@ static u16 le16(const u8 *p)
 /* Scratch for expanding FILL chunks; one write granule's worth. */
 static u8 fill_buf[FLASH_CHUNK_SECTORS * SECTOR_SIZE] DMA_SECTION;
 
+/*
+ * Ciphertext staging for an encrypted target.
+ *
+ * Encryption cannot be done in place in the caller's buffer. A sparse FILL
+ * chunk writes the same fill_buf repeatedly at different sector offsets, and
+ * every sector needs its own tweak -- encrypting fill_buf in place would
+ * consume the pattern on the first chunk and write nonsense afterwards.
+ * Staging through a separate buffer leaves every source untouched.
+ */
+static u8 crypt_buf[FLASH_CHUNK_SECTORS * SECTOR_SIZE] DMA_SECTION;
+
 /* Where the current flash is going, resolved before any data is written. */
 static struct {
     u32 dev;
     u32 start;
     u32 sectors;
+    int encrypt;        /* wrap in the partition AES-XTS on the way in */
 } flash_dst;
 
 /* Sectors actually put on the card by this command; skipped ones do not
@@ -619,8 +693,27 @@ static int flash_sectors(u32 off, const u8 *src, u32 n)
 
     while (n) {
         u32 chunk = n > FLASH_CHUNK_SECTORS ? FLASH_CHUNK_SECTORS : n;
-        int rc = mmc_write_blocks(flash_dst.start + off, src, chunk);
+        const u8 *out = src;
+        int rc;
 
+        /*
+         * Tweaks are ABSOLUTE sector numbers, the same ones the dump path
+         * uses, so that what is written here reads back through `dump` as the
+         * image that went in.
+         */
+        if (flash_dst.encrypt) {
+            u32 i;
+
+            for (i = 0; i < chunk; i++) {
+                if (spacc_xts_sector(crypt_buf + i * SECTOR_SIZE,
+                                     src + i * SECTOR_SIZE,
+                                     flash_dst.start + off + i, 1) != SPACC_OK)
+                    return FLASH_ERR_CRYPTO;
+            }
+            out = crypt_buf;
+        }
+
+        rc = mmc_write_blocks(flash_dst.start + off, out, chunk);
         if (rc != MMC_OK)
             return rc;
         off += chunk;
@@ -803,7 +896,7 @@ static void cmd_flash(const char *name)
     char line[FB_RESPONSE_MAX];
     const char *err = 0;
     u32 dev = 0, start = 0, sectors = 0, nsec, n;
-    int rc;
+    int rc, encrypted = 0;
 
     if (download_len == 0) {
         fb_fail("nothing staged; download first");
@@ -817,7 +910,7 @@ static void cmd_flash(const char *name)
         return;
     }
 
-    rc = resolve_part(name, &dev, &start, &sectors);
+    rc = resolve_part(name, &dev, &start, &sectors, &encrypted);
     if (rc != 0) {
         n = str_copy(line, "cannot resolve ", FB_RESPONSE_MAX);
         n += str_copy(line + n, name, 24);
@@ -829,6 +922,7 @@ static void cmd_flash(const char *name)
     flash_dst.dev     = dev;
     flash_dst.start   = start;
     flash_dst.sectors = sectors;
+    flash_dst.encrypt = encrypted;
     flash_written     = 0;
 
     rc = mmc_select_partition(dev);
@@ -1165,12 +1259,42 @@ static void cmd_oem(const char *args)
 
 /* ---- getvar ------------------------------------------------------------- */
 
+/*
+ * `getvar partition-size:<name>`, in bytes.
+ *
+ * The host asks for this before every flash, to decide whether the image has
+ * an AVB footer to preserve. Without an answer it warns about a zero-sized
+ * partition on every single flash, which is noise -- and resolve_part()
+ * already knows the number.
+ */
+static void cmd_getvar_partition_size(const char *name)
+{
+    char line[FB_RESPONSE_MAX];
+    u32 dev, start, sectors, n;
+
+    if (resolve_part(name, &dev, &start, &sectors, 0) != 0) {
+        /* Same as any unknown variable: OKAY with an empty value. The host
+         * reads that as "no size available" and moves on, which is the right
+         * answer for a name that does not resolve. */
+        fb_okay("");
+        return;
+    }
+
+    n = str_copy(line, "0x", FB_RESPONSE_MAX);
+    n += hex_format_min(line + n, (u64)sectors * SECTOR_SIZE);
+    line[n] = 0;
+    fb_okay(line);
+}
+
 static void cmd_getvar(const char *name)
 {
     char line[FB_RESPONSE_MAX];
+    const char *rest;
     u32 n;
 
-    if (str_eq(name, "version")) {
+    if ((rest = str_after(name, "partition-size:")) != 0) {
+        cmd_getvar_partition_size(rest);
+    } else if (str_eq(name, "version")) {
         fb_okay("0.5");
     } else if (str_eq(name, "product")) {
         fb_okay("ILCE-7M4");
