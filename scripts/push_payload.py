@@ -55,8 +55,6 @@ def boot_script(payload, addr=LOAD_ADDR, entry=None):
     recs += [
         record(0xFFFF, entry),
         record(0x0000, UNLOCK_WORD),
-        record(0xFFFF, entry),
-        record(0xFFFF, entry),
     ]
     return recs
 
