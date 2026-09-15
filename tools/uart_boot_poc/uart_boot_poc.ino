@@ -14,7 +14,7 @@ the more standard 38400 and 57600
 #include <hardware/structs/sio.h>
 #include <hardware/structs/timer.h>
 
-#define MULTI_RST 29
+#define MULTI_RST 27
 #define MULTI_TX 28
 
 #define US_REJECT 200u

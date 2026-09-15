@@ -11,7 +11,7 @@ Pro tip: If your camera "dies", don't panic, just pull the battery and it should
 
 */
 
-#define MULTI_RST 29
+#define MULTI_RST 27
 #define MULTI_TX 28
 
 void setup() {
