@@ -1,0 +1,24 @@
+.program serialboot
+
+.wrap_target
+carrier:
+    set pins, 1     [14]
+    mov x, status
+    jmp !x, blob
+    set pins, 0     [18]
+.wrap
+
+blob:
+    out x, 32
+    set y, 28
+    set pins, 0     [24]
+    set pins, 1     [24]
+preamble:
+    set pins, 0     [24]
+    set pins, 1     [23]
+    jmp y--, preamble
+bits:
+    out pins, 1
+    jmp x--, bits
+    irq set 0
+    jmp carrier

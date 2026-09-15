@@ -37,8 +37,7 @@ UNLOCK_WORD = 0x2CF25621
 LOAD_ADDR = 0xFE020000
 MAX_RECORD_PAYLOAD = 512  # true max is 4086, but this keeps progress chunking smooth
 
-CARRIER_START = 0.150
-TRANSMIT_START = 0.250
+TRANSMIT_START = 0.5
 RECORD_GAP = 0.0144
 
 
@@ -190,7 +189,6 @@ def main():
     try:
         dev.ping()
         dev.reset()
-        time.sleep(CARRIER_START)
         dev.carrier(1)
         time.sleep(TRANSMIT_START)
 

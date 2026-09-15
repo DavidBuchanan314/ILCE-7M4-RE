@@ -8,22 +8,22 @@ See MULTI_* defines for pinout (they go to the Sony multi-port connector).
 
 #include <string.h>
 
-#include <hardware/timer.h>
-#include <hardware/sync.h>
+#include <hardware/clocks.h>
+#include <hardware/dma.h>
+#include <hardware/pio.h>
 #include <hardware/structs/sio.h>
-#include <pico/platform.h>
+#include <hardware/timer.h>
+
+#include "serialboot.pio.h"
 
 #define MULTI_TX  28
 #define MULTI_RX  29
 #define MULTI_RST 27
 
-#define US_REJECT   200u
-#define US_PREAMBLE 262u
-#define US_BIT       21u
+#define PIO_CYCLE_US 10.5f
 
-#define PREAMBLE_EDGES 60u
 #define RESET_PULSE_US 10u
-#define STARVE_US      1200000u
+#define STARVE_MS      1200u
 
 #define VERSION "uart_boot 1"
 
@@ -40,126 +40,30 @@ enum {
   EVT_UART = 0x83,
 };
 
+enum {
+  MODE_IDLE,
+  MODE_CARRIER,
+  MODE_UART,
+};
+
 #define MAX_RECORD 4100u
 #define MAX_PKT    MAX_RECORD
 #define UART_CHUNK 512u
+#define BITS_PER_BYTE 11u
+#define MAX_BITWORDS (1u + (MAX_RECORD * BITS_PER_BYTE + 31u) / 32u)
 
-static uint8_t stage[MAX_RECORD];
-static volatile uint32_t stage_len;
-static volatile bool     stage_full;
-static volatile bool     carrier_on;
-static volatile bool     req_reset;
-static volatile bool     starved;
+static uint8_t  rx_buf[MAX_PKT];
+static uint8_t  uart_buf[UART_CHUNK];
+static uint32_t bitbuf[MAX_BITWORDS];
 
-static bool ack_pending;
-static bool payload_uart_is_up;
+static uint8_t  mode;
+static bool     blob_pending;
+static uint32_t last_blob_ms;
 
-#define __low_jitter(name) __attribute__((noinline)) __not_in_flash_func(name)
-
-static inline __attribute__((always_inline)) void wait_us(uint32_t us) {
-  uint32_t t0 = timer_hw->timerawl;
-  while ((uint32_t)(timer_hw->timerawl - t0) < us) {
-    tight_loop_contents();
-  }
-}
-
-static inline __attribute__((always_inline)) void tx(bool level) {
-  if (level) {
-    sio_hw->gpio_set = 1u << MULTI_TX;
-  } else {
-    sio_hw->gpio_clr = 1u << MULTI_TX;
-  }
-}
-
-static void pulse_reset(void) {
-  sio_hw->gpio_clr    = 1u << MULTI_RST;
-  sio_hw->gpio_oe_set = 1u << MULTI_RST;
-  wait_us(RESET_PULSE_US);
-  sio_hw->gpio_oe_clr = 1u << MULTI_RST;
-}
-
-static void __low_jitter(carrier_pulse)(void) {
-  wait_us(US_REJECT);
-  tx(true);
-  wait_us(US_REJECT);
-  tx(false);
-}
-
-static void __low_jitter(send_byte)(uint8_t v) {
-  tx(false);
-  wait_us(US_BIT);
-  uint8_t x = 0;
-  for (uint32_t i = 0; i < 8; i++) {
-    bool bit = (v >> i) & 1u;
-    x ^= (uint8_t)bit;
-    tx(bit);
-    wait_us(US_BIT);
-  }
-  tx(!x);
-  wait_us(US_BIT);
-  tx(true);
-  wait_us(US_BIT);
-}
-
-static void __low_jitter(send_blob)(const uint8_t *buf, uint32_t len) {
-  wait_us(US_PREAMBLE);
-  tx(true);
-  bool level = false;
-  for (uint32_t i = 1; i < PREAMBLE_EDGES - 1u; i++) {
-    wait_us(US_PREAMBLE);
-    tx(level);
-    level = !level;
-  }
-  wait_us(US_PREAMBLE);
-  for (uint32_t b = 0; b < len; b++) {
-    send_byte(buf[b]);
-  }
-}
-
-static void __low_jitter(run_carrier)(void) {
-  uint32_t irq = save_and_disable_interrupts();
-
-  tx(false);
-  sio_hw->gpio_oe_set = 1u << MULTI_TX;
-
-  uint32_t idle_since = timer_hw->timerawl;
-
-  while (carrier_on) {
-    if (stage_full) {
-      __compiler_memory_barrier();
-      send_blob(stage, stage_len);
-      tx(false);
-      stage_full = false;
-      idle_since = timer_hw->timerawl;
-    } else {
-      carrier_pulse();
-      if ((uint32_t)(timer_hw->timerawl - idle_since) > STARVE_US) {
-        starved     = true;
-        carrier_on  = false;
-      }
-    }
-  }
-
-  sio_hw->gpio_oe_clr = 1u << MULTI_TX;
-  restore_interrupts(irq);
-}
-
-void setup1(void) {
-}
-
-void loop1(void) {
-  if (req_reset) {
-    pulse_reset();
-    req_reset = false;
-  }
-
-  if (carrier_on) {
-    run_carrier();
-  }
-}
-
-static uint8_t rx_buf[MAX_PKT];
-static uint8_t uart_buf[UART_CHUNK];
+static PIO      pio = pio0;
+static int      pio_sm = -1;
+static uint     pio_off;
+static int      dma_chan = -1;
 
 static uint8_t  rx_hdr_got;
 static uint8_t  rx_type;
@@ -183,13 +87,106 @@ static void send_text(uint8_t type, const char *s) {
   send_pkt(type, s, (uint16_t)strlen(s));
 }
 
-static void payload_uart_down(void) {
-  if (!payload_uart_is_up) {
-    return;
+static void pulse_reset(void) {
+  sio_hw->gpio_clr    = 1u << MULTI_RST;
+  sio_hw->gpio_oe_set = 1u << MULTI_RST;
+  busy_wait_us_32(RESET_PULSE_US);
+  sio_hw->gpio_oe_clr = 1u << MULTI_RST;
+}
+
+static void carrier_start(void) {
+  pio_sm_config c = serialboot_program_get_default_config(pio_off);
+  sm_config_set_set_pins(&c, MULTI_TX, 1);
+  sm_config_set_out_pins(&c, MULTI_TX, 1);
+  sm_config_set_out_shift(&c, true, true, 32);
+  sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) * (PIO_CYCLE_US / 1000000.0f));
+  sm_config_set_mov_status(&c, STATUS_TX_LESSTHAN, 1);
+
+  pio_gpio_init(pio, MULTI_TX);
+  pio_sm_set_consecutive_pindirs(pio, pio_sm, MULTI_TX, 1, true);
+  pio_sm_init(pio, pio_sm, pio_off, &c);
+  pio_sm_clear_fifos(pio, pio_sm);
+  pio_interrupt_clear(pio, 0);
+  pio_sm_set_enabled(pio, pio_sm, true);
+}
+
+static void carrier_stop(void) {
+  if (dma_channel_is_busy(dma_chan)) {
+    dma_channel_abort(dma_chan);
   }
+  pio_sm_set_enabled(pio, pio_sm, false);
+  pinMode(MULTI_TX, INPUT);
+  blob_pending = false;
+}
+
+static uint32_t build_bits(const uint8_t *rec, uint32_t len) {
+  uint32_t nbits = (len * BITS_PER_BYTE + 31u) & ~31u;
+  uint32_t nwords = nbits / 32u;
+
+  memset(bitbuf + 1, 0, nwords * sizeof(uint32_t));
+  bitbuf[0] = nbits - 1u;
+
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < len; i++) {
+    uint8_t v = rec[i];
+    uint32_t frame = 1u << 10;
+    uint32_t x = 0;
+    for (uint32_t b = 0; b < 8; b++) {
+      uint32_t bit = (v >> b) & 1u;
+      x ^= bit;
+      frame |= bit << (1u + b);
+    }
+    frame |= (x ? 0u : 1u) << 9;
+
+    for (uint32_t b = 0; b < BITS_PER_BYTE; b++) {
+      if (frame & (1u << b)) {
+        bitbuf[1u + (n >> 5)] |= 1u << (n & 31u);
+      }
+      n++;
+    }
+  }
+
+  uint32_t npad = nbits - n;
+  for (uint32_t p = 0; n < nbits; p++, n++) {
+    if (((npad - 1u - p) >> 3) & 1u) {
+      bitbuf[1u + (n >> 5)] |= 1u << (n & 31u);
+    }
+  }
+
+  return 1u + nwords;
+}
+
+static void blob_send(uint32_t nwords) {
+  dma_channel_config c = dma_channel_get_default_config(dma_chan);
+  channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+  channel_config_set_read_increment(&c, true);
+  channel_config_set_write_increment(&c, false);
+  channel_config_set_dreq(&c, pio_get_dreq(pio, pio_sm, true));
+  dma_channel_configure(dma_chan, &c, &pio->txf[pio_sm], bitbuf, nwords, true);
+}
+
+static void uart_start(uint32_t baud) {
+  Serial1.setFIFOSize(1024);
+  Serial1.setTX(MULTI_TX);
+  Serial1.setRX(MULTI_RX);
+  Serial1.begin(baud);
+}
+
+static void uart_stop(void) {
   Serial1.end();
   pinMode(MULTI_TX, INPUT);
-  payload_uart_is_up = false;
+}
+
+static void mode_set(uint8_t m, uint32_t baud) {
+  switch (mode) {
+  case MODE_CARRIER: carrier_stop(); break;
+  case MODE_UART:    uart_stop();    break;
+  }
+  switch (m) {
+  case MODE_CARRIER: carrier_start();  break;
+  case MODE_UART:    uart_start(baud); break;
+  }
+  mode = m;
 }
 
 static void handle_pkt(uint8_t type, uint8_t *d, uint16_t len) {
@@ -199,7 +196,7 @@ static void handle_pkt(uint8_t type, uint8_t *d, uint16_t len) {
     break;
 
   case CMD_RESET:
-    req_reset = true;
+    pulse_reset();
     send_pkt(EVT_ACK, NULL, 0);
     break;
 
@@ -209,23 +206,22 @@ static void handle_pkt(uint8_t type, uint8_t *d, uint16_t len) {
       break;
     }
     if (d[0]) {
-      payload_uart_down();
-      starved     = false;
-      stage_full  = false;
-      ack_pending = false;
-      carrier_on = true;
+      if (mode != MODE_CARRIER) {
+        mode_set(MODE_CARRIER, 0);
+      }
+      last_blob_ms = millis();
     } else {
-      carrier_on = false;
+      mode_set(MODE_IDLE, 0);
     }
     send_pkt(EVT_ACK, NULL, 0);
     break;
 
   case CMD_BLOB:
-    if (!carrier_on) {
+    if (mode != MODE_CARRIER) {
       send_text(EVT_ERR, "carrier off");
       break;
     }
-    if (stage_full || ack_pending) {
+    if (blob_pending) {
       send_text(EVT_ERR, "slot busy");
       break;
     }
@@ -233,11 +229,9 @@ static void handle_pkt(uint8_t type, uint8_t *d, uint16_t len) {
       send_text(EVT_ERR, "record too long");
       break;
     }
-    memcpy(stage, d, len);
-    stage_len = len;
-    __compiler_memory_barrier();
-    stage_full  = true;
-    ack_pending = true;
+    blob_send(build_bits(d, len));
+    blob_pending = true;
+    last_blob_ms = millis();
     break;
 
   case CMD_BAUD: {
@@ -246,24 +240,17 @@ static void handle_pkt(uint8_t type, uint8_t *d, uint16_t len) {
       break;
     }
     uint32_t baud = le32(d);
-    if (baud && carrier_on) {
+    if (baud && mode == MODE_CARRIER) {
       send_text(EVT_ERR, "carrier on");
       break;
     }
-    payload_uart_down();
-    if (baud) {
-      Serial1.setFIFOSize(1024);
-      Serial1.setTX(MULTI_TX);
-      Serial1.setRX(MULTI_RX);
-      Serial1.begin(baud);
-      payload_uart_is_up = true;
-    }
+    mode_set(baud ? MODE_UART : MODE_IDLE, baud);
     send_pkt(EVT_ACK, NULL, 0);
     break;
   }
 
   case CMD_UART:
-    if (!payload_uart_is_up) {
+    if (mode != MODE_UART) {
       send_text(EVT_ERR, "uart not up");
       break;
     }
@@ -323,25 +310,29 @@ void setup(void) {
   pinMode(MULTI_RX,  INPUT);
   pinMode(MULTI_RST, INPUT);
 
+  pio_sm   = pio_claim_unused_sm(pio, true);
+  pio_off  = pio_add_program(pio, &serialboot_program);
+  dma_chan = dma_claim_unused_channel(true);
+
   Serial.begin(115200);
 }
 
 void loop(void) {
   poll_host();
 
-  if (starved) {
-    starved     = false;
-    stage_full  = false;
-    ack_pending = false;
-    send_text(EVT_ERR, "starved");
-  }
-
-  if (ack_pending && !stage_full) {
-    ack_pending = false;
+  if (blob_pending && pio_interrupt_get(pio, 0)) {
+    pio_interrupt_clear(pio, 0);
+    blob_pending = false;
     send_pkt(EVT_ACK, NULL, 0);
   }
 
-  if (payload_uart_is_up) {
+  if (mode == MODE_CARRIER && !blob_pending &&
+      (uint32_t)(millis() - last_blob_ms) > STARVE_MS) {
+    mode_set(MODE_IDLE, 0);
+    send_text(EVT_ERR, "starved");
+  }
+
+  if (mode == MODE_UART) {
     int n = Serial1.available();
     if (n > 0) {
       if (n > (int)sizeof(uart_buf)) {
