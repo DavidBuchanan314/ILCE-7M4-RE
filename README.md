@@ -1,13 +1,14 @@
 # ILCE-7M4-RE
 RE notes for ILCE-7M4, aka Sony A7 IV mirrorless camera
 
-## Serial Boot Protocol
+## Fun Facts
 
-The AP bootrom has a secret (or not so secret) serial boot mode, which you can reach by blasting the right bits down the RX pin shortly after reset. On cameras with a "multi" connector (like the A7IV), the pinout is as follows:
-
-[TODO]
-
-
+- There is a "secret" serial boot mode, in the bootrom.
+- You can reach the serial bootloader by blasting the right bits down the RX pin of the accessory connector, shortly after reset (see `tools/uart_boot`).
+- I've produced a bare-metal fastboot-compatible boot payload, which can be used to back up and restore eMMC partitions over USB (see `payloads/fastboot`).
+- The eMMC partitions are encrypted with AES-XTS, but there is no signature verification.
+- I have all the encryption keys - see `scripts/parse_emmc_boot0.py`, `scripts/parse_emmc_partitions.py`.
+- The fastboot dump/flash commands handle the crypto transparently (except for boot0, not yet implemented).
 
 ## Memory Map (Main AP)
 
