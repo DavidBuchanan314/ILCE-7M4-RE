@@ -11,7 +11,15 @@ BUILD  := build
 
 # -mgeneral-regs-only keeps the compiler off FP/SIMD, which would need CPACR/CPTR
 # set up before first use. Nothing here needs floating point.
+#
+# -mstrict-align is NOT optional here. We run with the MMU off, which makes
+# every data access Device-nGnRnE, and Device memory does not permit unaligned
+# accesses -- they raise an alignment fault, and with no vector table installed
+# that is an unrecoverable hang. Without this flag GCC happily merges adjacent
+# byte stores into one unaligned word store: building a packet header with
+# four byte writes became `stur w22, [sp, #49]`, which wedged the CPU solid.
 CFLAGS := -march=armv8-a -mgeneral-regs-only -mbranch-protection=none \
+          -mstrict-align \
           -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-common \
           -ffunction-sections -fdata-sections \
           -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Iinclude

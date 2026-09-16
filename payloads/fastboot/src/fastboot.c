@@ -6,6 +6,7 @@
 #include "spacc.h"
 #include "dwc3.h"
 #include "reset.h"
+#include "darwin.h"
 
 /*
  * Fastboot protocol.
@@ -1231,6 +1232,118 @@ static void cmd_dumpbrom(void)
     fb_result("hint: fastboot get_staged brom.bin");
 }
 
+/* ---- oem darwin --------------------------------------------------------- */
+
+/*
+ * The Darwin link, and with it the Virtual WDT.
+ *
+ * Everything here is deliberately exposed as separate steps rather than one
+ * "make it stop" command. The transport is unverified on hardware: if it does
+ * not work, `darwin` and `darwin read` say so without changing any state, and
+ * a wrong guess about SIO gets diagnosed from the host rather than by
+ * reflashing.
+ */
+
+static void darwin_show_bytes(const char *what, const u8 *b, u32 n)
+{
+    char line[FB_RESPONSE_MAX];
+    u32 i, k = 0;
+
+    k += str_copy(line + k, what, FB_RESPONSE_MAX - k);
+    for (i = 0; i < n; i++) {
+        line[k++] = ' ';
+        k += hex_format(line + k, b[i], 2);
+    }
+    line[k] = 0;
+    fb_info(line);
+}
+
+/*
+ * `oem darwin` -- report the watchdog without touching it.
+ *
+ * A reload byte of 00 means vwdt_set is a no-op and that channel can never be
+ * armed; 0A means the AP populated Darwin's config during a normal boot this
+ * power cycle, so the two also say which regime a boot is in.
+ *
+ * A counter of FF is the disabled sentinel vwdt_tick skips. 00 means the tick
+ * is not running at all: a live tick decrements 00 to FF and stores it back
+ * within one 100 ms period, so a stable 00 cannot be a running watchdog.
+ */
+static void cmd_darwin_state(void)
+{
+    u8 counters[4], reloads[3];
+
+    if (darwin_vwdt_state(counters, reloads) != 0) {
+        fb_fail("no reply from darwin (link down?)");
+        return;
+    }
+
+    darwin_show_bytes("counters @200026fc:", counters, 4);
+    darwin_show_bytes("reloads  @2000003c:", reloads, 3);
+
+    fb_okay("");
+}
+
+/*
+ * `oem darwin peek:<addr>[:<len>]` -- the Darwin-side counterpart to
+ * `oem peek`, over command 0x16. Darwin does not bounds check reads, so this
+ * reaches its flash as well as its RAM.
+ */
+static void cmd_darwin_peek(const char *args)
+{
+    const char *p;
+    u32 addr, len, off;
+    u8 buf[0x78];
+
+    addr = (u32)hex_parse(args, &p);
+    if (p == args) {
+        fb_fail("usage: oem darwin peek:<addr>[:<len>]");
+        return;
+    }
+    len = 16;
+    if (*p == ':')
+        len = (u32)hex_parse(p + 1, 0);
+    if (len == 0 || len > sizeof(buf)) {
+        fb_fail("bad length (max 0x78)");
+        return;
+    }
+
+    if (darwin_read(addr, buf, len) != 0) {
+        fb_fail("no reply from darwin (link down?)");
+        return;
+    }
+
+    for (off = 0; off < len; off += 8) {
+        char line[FB_RESPONSE_MAX];
+        u32 i, k = 0;
+
+        k += hex_format(line + k, addr + off, 8);
+        line[k++] = ':';
+        for (i = 0; i < 8 && off + i < len; i++) {
+            line[k++] = ' ';
+            k += hex_format(line + k, buf[off + i], 2);
+        }
+        line[k] = 0;
+        fb_info(line);
+    }
+    fb_okay("");
+}
+
+static void cmd_darwin(const char *args)
+{
+    const char *rest;
+
+    if (str_eq(args, "")) {
+        cmd_darwin_state();
+        return;
+    }
+    if ((rest = str_after(args, " peek:")) != 0) {
+        cmd_darwin_peek(rest);
+        return;
+    }
+    fb_fail("usage: oem darwin [peek:<addr>[:<len>]]");
+}
+
 /* ---- oem help ----------------------------------------------------------- */
 
 static void cmd_help(void)
@@ -1242,6 +1355,8 @@ static void cmd_help(void)
     fb_info("partition            list eMMC partitions");
     fb_info("partition dump <name> [<off> [<sz>]]");
     fb_info("dumpbrom             stage the bootrom for get_staged");
+    fb_info("darwin               show the Virtual WDT state");
+    fb_info("darwin peek:<addr>[:<len>]   read Darwin memory");
 
     fb_okay("");
 }
@@ -1276,6 +1391,10 @@ static void cmd_oem(const char *args)
     }
     if (str_eq(args, "dumpbrom")) {
         cmd_dumpbrom();
+        return;
+    }
+    if ((rest = str_after(args, "darwin")) != 0) {
+        cmd_darwin(rest);
         return;
     }
     fb_fail("unknown oem command (try: oem help)");

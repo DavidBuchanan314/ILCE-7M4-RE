@@ -12,4 +12,8 @@ $ fastboot oem help
 (bootloader) exec:<addr>          call addr, reports return value
 (bootloader) partition            list eMMC partitions
 (bootloader) partition dump <name> [<off> [<sz>]]
+(bootloader) darwin               show the Virtual WDT state
+(bootloader) darwin peek:<addr>[:<len>]   read Darwin memory
 ```
+
+note: the bare "darwin" command existed for WDT debugging and could probably be changed/removed.

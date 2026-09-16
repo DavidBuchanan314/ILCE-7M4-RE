@@ -5,6 +5,7 @@
 #include "dwc3.h"
 #include "usb.h"
 #include "sdhci.h"
+#include "darwin.h"
 
 /*
  * Milestone: get the D+ pullup up, and report precisely how far we got.
@@ -56,6 +57,10 @@ int main(void)
      * eMMC. `oem mmcinit` retries, and eMMC commands retry on demand.
      */
     mmc_init();
+
+    /* Idle the Darwin chip select. Sends nothing -- the link is only used
+     * once a command asks for it. */
+    darwin_init();
 
     usb_phy_init();
 
