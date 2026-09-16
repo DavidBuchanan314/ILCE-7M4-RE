@@ -4,6 +4,8 @@
 #include "led.h"
 #include "sdhci.h"
 #include "spacc.h"
+#include "dwc3.h"
+#include "reset.h"
 
 /*
  * Fastboot protocol.
@@ -1369,6 +1371,25 @@ static void cmd_download(const char *args)
     fb_okay("");
 }
 
+/* ---- reboot ------------------------------------------------------------- */
+
+/*
+ * fb_okay() is synchronous -- it returns only once the IN transfer completes --
+ * so the reply is on the wire by the time we get here. Dropping the D+ pullup
+ * before the reset turns "vanished mid-bus" into a clean unplug; 50 ms is well
+ * past the 2.5 us the spec needs to call it a disconnect.
+ */
+static void cmd_reboot(void)
+{
+    fb_okay("");
+
+    mdelay(50);
+    dwc3_disconnect();
+    mdelay(10);
+
+    system_reset();
+}
+
 /* ---- command dispatch --------------------------------------------------- */
 
 static void fastboot_command(const char *cmd)
@@ -1385,10 +1406,12 @@ static void fastboot_command(const char *cmd)
         cmd_flash(rest);
     } else if (str_eq(cmd, "upload")) {
         cmd_upload();
-    } else if (str_eq(cmd, "reboot") || str_eq(cmd, "reboot-bootloader")) {
-        /* Nothing sane to reboot into from a bootrom payload; answer so the
-         * host does not hang waiting. */
-        fb_okay("");
+    } else if (str_eq(cmd, "reboot")) {
+        cmd_reboot();
+    } else if (str_after(cmd, "reboot-") != 0) {
+        /* reboot-bootloader and friends name a target we cannot deliver.
+         * Fail rather than quietly doing a plain reboot. */
+        fb_fail("only plain `reboot` is supported");
     } else {
         fb_fail("unknown command");
     }
