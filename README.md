@@ -1,6 +1,8 @@
 # ILCE-7M4-RE
 RE notes for ILCE-7M4, aka Sony A7 IV mirrorless camera
 
+<img width="512px" src="https://github.com/user-attachments/assets/6bdac0e5-f44d-49e6-a805-1c6c1bce6a5c" />
+
 ## Fun Facts
 
 - There is a "secret" serial boot mode, in the bootrom.
