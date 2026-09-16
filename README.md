@@ -1,7 +1,7 @@
 # ILCE-7M4-RE
 RE notes for ILCE-7M4, aka Sony A7 IV mirrorless camera
 
-<img width="512px" src="https://github.com/user-attachments/assets/6bdac0e5-f44d-49e6-a805-1c6c1bce6a5c" />
+<img width="512px" src="images/pwned.jpg" />
 
 ## Fun Facts
 
@@ -11,6 +11,8 @@ RE notes for ILCE-7M4, aka Sony A7 IV mirrorless camera
 - The eMMC partitions are encrypted with AES-XTS, but there is no signature verification.
 - I have all the encryption keys - see `scripts/parse_emmc_boot0.py`, `scripts/parse_emmc_partitions.py`.
 - The fastboot dump/flash commands handle the crypto transparently (except for boot0, not yet implemented).
+
+<img width="512px" src="images/multi_breakout.jpg" />
 
 ## Memory Map (Main AP)
 
