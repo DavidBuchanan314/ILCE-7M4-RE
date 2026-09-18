@@ -3,6 +3,7 @@
 #include "monitor.h"
 #include "ospi.h"
 #include "mbox.h"
+#include "uart.h"
 
 #define RDY_DATA        0xC3
 #define RDY_TAG         0x10
@@ -101,16 +102,16 @@ static void do_download(const u8 *cmd)
         return;
     }
 
+    /*
+     * Receive, then acknowledge -- the order the ROM uses and the order the
+     * master relies on. Acknowledging first looks equivalent and is not: the
+     * master sends the next frame as soon as it sees the ack, so the drain
+     * that follows swallows the frame instead of the master's polling, and
+     * the transfer stalls one frame in.
+     */
     while (done < count) {
         u8 chunk[SPI_FRAME];
         u32 i;
-
-        if (spi_send_word(ACK_DATA, ack_seq) != SPI_OK) {
-            res_failed = 1;
-            return;
-        }
-        ack_seq = seq_next(ack_seq);
-        spi_drain();
 
         if (spi_recv_frame(chunk) != SPI_OK) {
             res_failed = 1;
@@ -132,6 +133,13 @@ static void do_download(const u8 *cmd)
                 *(volatile u8 *)a = (u8)v;
             done++;
         }
+
+        if (spi_send_word(ACK_DATA, ack_seq) != SPI_OK) {
+            res_failed = 1;
+            return;
+        }
+        ack_seq = seq_next(ack_seq);
+        spi_drain();
     }
 
     send_response(RES_OK, 0);
@@ -179,6 +187,25 @@ static void do_nor_read(const u8 *cmd)
         }
         done += chunk;
     }
+}
+
+/*
+ * Text is fetched from CP memory rather than carried in the frame: a frame
+ * has twelve bytes spare after the header, which is not a line of log.
+ */
+static void do_uart_tx(const u8 *cmd)
+{
+    u32 addr = frame_get32(cmd, 8);
+    u32 len = frame_get32(cmd, 12);
+
+    if (len == 0 || len > 0x1000) {
+        send_response(RES_ERR, 0);
+        return;
+    }
+
+    uart_write((const u8 *)(unsigned long)addr, len);
+    uart_puts("\n");
+    send_response(RES_OK, 0);
 }
 
 static void do_nor_cmd(const u8 *cmd)
@@ -252,6 +279,7 @@ void monitor_loop(void)
         case OP_DOWNLOAD: do_download(cmd);         break;
         case OP_NOR_READ: do_nor_read(cmd);         break;
         case OP_NOR_CMD:  do_nor_cmd(cmd);          break;
+        case OP_UART_TX:  do_uart_tx(cmd);          break;
         default:          send_response(RES_ERR, 0); break;
         }
 

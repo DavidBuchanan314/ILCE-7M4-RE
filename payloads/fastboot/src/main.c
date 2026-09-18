@@ -7,6 +7,7 @@
 #include "sdhci.h"
 #include "darwin.h"
 #include "cetus.h"
+#include "log.h"
 
 /*
  * Milestone: get the D+ pullup up, and report precisely how far we got.
@@ -46,7 +47,43 @@ int main(void)
 
     led_init();
     timer_init();
-    led_selftest();
+
+    /*
+     * One short flash, not the six-second selftest that used to run here.
+     * Everything the selftest confirmed -- that the payload executes, that
+     * the timer runs near the rate timer.h claims -- the log line below says
+     * better and in text, and it said it six seconds into every boot.
+     *
+     * The blip is still worth its 120 ms: it is the only sign of life for the
+     * window before the CP is up, which is exactly where a hang would leave
+     * nothing else to look at.
+     */
+    led_blip();
+
+    /* Idle the Darwin chip select. Sends nothing -- the link is only used
+     * once a command asks for it. */
+    darwin_init();
+
+    /*
+     * Take the CP and put our own payload on it, before anything else that
+     * could fail.
+     *
+     * Left alone it boots from NOR and its firmware reconfigures the flash,
+     * and none of that is undone by a later reset. Resetting it into the ROM
+     * monitor and immediately replacing that with the bundled payload means
+     * the flash commands are available from the first command, with nothing
+     * to stage by hand -- and, since that payload owns the UART, it is what
+     * turns every line below from an LED blink count into text.
+     *
+     * A failure is not fatal: USB is the more useful of the two, and it is
+     * also the only way to find out what went wrong. `oem cetus` reports it.
+     */
+    ret = cetus_bring_up();
+    log_init();
+    if (ret == 0)
+        mira_log("cetus payload up");
+    else
+        mira_logx("cetus bring-up failed, rc", (u64)(u32)-ret);
 
     /*
      * Bring the eMMC up before USB. It is quick when it works (a handful of
@@ -57,47 +94,43 @@ int main(void)
      * two, and losing it would also lose the channel needed to diagnose the
      * eMMC. `oem mmcinit` retries, and eMMC commands retry on demand.
      */
-    mmc_init();
+    mira_log("mmc init");
+    if (mmc_init() == MMC_OK)
+        mira_log("mmc ready");
+    else
+        mira_log("mmc init failed (not fatal)");
 
-    /* Idle the Darwin chip select. Sends nothing -- the link is only used
-     * once a command asks for it. */
-    darwin_init();
-
-    /*
-     * Take the CP and put our own payload on it.
-     *
-     * Left alone it boots from NOR and its firmware reconfigures the flash,
-     * and none of that is undone by a later reset. Resetting it into the ROM
-     * monitor and immediately replacing that with the bundled payload means
-     * the flash commands are available from the first command, with nothing
-     * to stage by hand.
-     *
-     * A failure is not fatal -- USB is the more useful of the two, and it is
-     * also the only way to find out what went wrong. `oem cetus` reports it.
-     */
-    cetus_bring_up();
-
+    mira_log("usb phy");
     usb_phy_init();
 
     ret = dwc3_core_init();
+    if (ret != DWC3_OK)
+        mira_logx("dwc3 core init failed, rc", (u64)(u32)-ret);
     if (ret == DWC3_ERR_NOT_DWC3)
         led_fail(FAIL_NOT_DWC3);
     if (ret == DWC3_ERR_SOFTRESET)
         led_fail(FAIL_SOFTRESET);
     if (ret != DWC3_OK)
         led_panic();
+    mira_log("dwc3 core up");
 
     /*
      * ep0 has to be configured and a SETUP armed BEFORE the pullup goes up,
      * or the host will reset the bus and send its first SETUP into a device
      * that is not listening yet.
      */
-    if (usb_gadget_init() != 0)
+    if (usb_gadget_init() != 0) {
+        mira_log("ep0 config failed");
         led_fail(FAIL_EP0_CONFIG);
+    }
 
     ret = dwc3_connect();
-    if (ret != DWC3_OK)
+    if (ret != DWC3_OK) {
+        mira_logx("dwc3 connect failed, rc", (u64)(u32)-ret);
         led_fail(FAIL_NOT_STARTED);
+    }
+
+    mira_log("fastboot ready");
 
     (void)STATE_UP_TCA_OK;
     (void)STATE_UP_TCA_FAIL;

@@ -78,12 +78,21 @@ disasm: $(BUILD)/$(TARGET).elf
 # Stage over the RP2040 serial-boot bridge. No unlock word: the ROM's challenge
 # check is bypassed by never reaching it (UNLOCK_BYPASS.md).
 #
-# --no-forward because this payload has no UART transmit side; its only output
-# is the LED. Drop the flag once there is something to forward.
+# The push itself only proves the records went out, so it waits for the payload
+# to say it got all the way up and fails if it does not. Everything the payload
+# logs on the way is printed, so a boot that stops early shows where.
+#
+# That log arrives over the co-processor's UART, so this can only report a
+# failure the AP survived long enough to describe -- if it dies before the CP
+# is up, the LED blip is still the only sign.
 PORT ?= /dev/ttyACM0
+READY ?= [mira] fastboot ready
+READY_TIMEOUT ?= 5
 
 push: $(BUILD)/$(TARGET).bin
-	python3 ../../scripts/push_payload.py -p $(PORT) --no-forward $(BUILD)/$(TARGET).bin
+	python3 ../../scripts/push_payload.py -p $(PORT) \
+	  --expect '$(READY)' --expect-timeout $(READY_TIMEOUT) \
+	  $(BUILD)/$(TARGET).bin
 
 clean:
 	rm -rf $(BUILD)

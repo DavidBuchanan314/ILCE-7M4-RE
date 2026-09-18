@@ -12,6 +12,7 @@
 #define OP_DOWNLOAD     0x21    /* +1 width log2, +8 addr, +12 count         */
 #define OP_NOR_READ     0x30    /* +8 flash offset, +12 byte count           */
 #define OP_NOR_CMD      0x32    /* +1 op, +2 dummy, +3 len, +8 addr, +12 flags */
+#define OP_UART_TX      0x33    /* +8 addr, +12 len -- send that text on the UART */
 
 #define RES_OK          0x81
 #define RES_ERR         0x82

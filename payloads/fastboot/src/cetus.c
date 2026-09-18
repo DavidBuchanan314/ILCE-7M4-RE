@@ -3,6 +3,9 @@
 #include "scu.h"
 #include "cetus.h"
 
+/* Longest line `oem cetus println:` can carry, bounded by the command buffer. */
+#define FB_TEXT_MAX 64
+
 #define SPI0_BASE       0xF1017000ull
 #define SSP_CR0         (SPI0_BASE + 0x00)
 #define SSP_CR1         (SPI0_BASE + 0x04)
@@ -80,6 +83,7 @@ static u32 rate_scr     = 2u;
 #define CMD_UPLOAD      0x22
 #define CMD_NOR_READ    0x30
 #define CMD_NOR_CMD     0x32
+#define CMD_UART_TX     0x33
 
 /* Read Identification, per JEDEC. */
 #define OP_RDID         0x9F
@@ -589,4 +593,33 @@ int cetus_bring_up(void)
     cetus_monitor_boot();
     payload_state = cetus_payload_start();
     return payload_state;
+}
+
+int cetus_println(const char *s)
+{
+    u8 buf[FB_TEXT_MAX];
+    u8 f[CETUS_FRAME], res[CETUS_FRAME];
+    u32 len = 0, padded;
+    int rc;
+
+    while (s[len] && len < sizeof(buf))
+        len++;
+    if (len == 0)
+        return CETUS_E_ARG;
+
+    for (padded = 0; padded < len; padded++)
+        buf[padded] = (u8)s[padded];
+    while (padded & 3)
+        buf[padded++] = 0;
+
+    rc = cetus_write(CETUS_TEXT_BUF, buf, padded, 4);
+    if (rc != 0)
+        return rc;
+
+    cetus_spi_init();
+    frame_init(f, CMD_UART_TX, 0);
+    frame_put32(f, 8, CETUS_TEXT_BUF);
+    frame_put32(f, 12, len);
+
+    return send_command(f, res);
 }

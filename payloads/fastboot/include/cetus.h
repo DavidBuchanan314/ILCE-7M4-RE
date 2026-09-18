@@ -21,6 +21,12 @@
 /* Where the bundled CP payload is staged and entered. */
 #define CETUS_PAYLOAD_BASE  0xFE020000u
 
+/*
+ * Scratch in CP eSRAM, past the payload's code and its mailbox, used to hand
+ * over text too long to ride in a command frame.
+ */
+#define CETUS_TEXT_BUF      0xFE031000u
+
 void cetus_spi_init(void);
 
 /* sel picks the 48/96/192 MHz source; SCK = source / (cpsdvsr * (1 + scr)). */
@@ -52,6 +58,9 @@ int cetus_entry(u32 addr);
  */
 int cetus_nor_read(u32 offset, u8 *buf, u32 len);
 int cetus_nor_id(u32 *id);
+
+/* Send a line out the CP's UART on the multi connector. */
+int cetus_println(const char *s);
 
 /* One flash command, up to 8 bytes back. Issues exactly the opcode given. */
 int cetus_nor_cmd(u8 op, u8 dummy, u8 nbytes, u32 addr, int use_addr, u8 *out);

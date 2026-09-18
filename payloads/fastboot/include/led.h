@@ -58,6 +58,10 @@ void led_off(void);
  */
 void led_selftest(void);
 
+/* One short flash. Cheap proof the payload is executing, for the window
+ * before the UART log exists. */
+void led_blip(void);
+
 /* Marker pulse, used to frame a count so the start is unambiguous. */
 void led_marker(void);
 

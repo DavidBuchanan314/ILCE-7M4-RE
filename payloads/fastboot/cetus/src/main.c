@@ -2,11 +2,15 @@
 #include "mbox.h"
 #include "ospi.h"
 #include "monitor.h"
+#include "uart.h"
 
 volatile struct mbox mbox __attribute__((section(".mbox")));
 
 int main(void)
 {
+    uart_init(0);
+    uart_puts("[cetus] hello uart!\n");
+
     mbox.magic = MBOX_MAGIC;
     mbox.version = MBOX_VERSION;
     mbox.status = ST_RUNNING;

@@ -59,6 +59,11 @@ void led_selftest(void)
     }
 }
 
+void led_blip(void)
+{
+    pulse(120, 0);
+}
+
 void led_marker(void)
 {
     pulse(MARKER_ON_MS, MARKER_OFF_MS);

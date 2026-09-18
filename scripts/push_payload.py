@@ -91,7 +91,7 @@ def boot_script(payload, addr=LOAD_ADDR, entry=None, unlock_code=None):
     recs.append(record(SerCmd.SET_ENTRY, entry))
     recs.append(record(SerCmd.SET_UNLOCK, unlock_code))
     recs.append(record(SerCmd.END_MARKER, 0))
-    
+
     return recs
 
 
@@ -165,6 +165,34 @@ class Device:
         self.ack()
 
 
+def await_line(dev, want, timeout, log=None):
+    """
+    Echo the payload's log until `want` shows up, or give up.
+    """
+    got = bytearray()
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        pkt = dev.recv()
+        if pkt is None:
+            continue
+        evt, data = pkt
+        if evt != RpEvt.UART:
+            continue
+
+        got += data
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+        if log:
+            log.write(data)
+            log.flush()
+
+        if want.encode() in got:
+            return True
+
+    return False
+
+
 def forward(dev, log=None):
     stdin_tty = sys.stdin.isatty()
     saved = None
@@ -210,6 +238,10 @@ def main():
     ap.add_argument("-u", "--unlock-code", type=lambda s: int(s, 0), default=None)  # 0x2CF25621 for A7IV
     ap.add_argument("-b", "--baud", type=int, default=115200)
     ap.add_argument("--no-forward", action="store_true")
+    ap.add_argument("--expect", metavar="TEXT",
+                    help="wait for TEXT on the payload uart, then exit; "
+                         "fail if it never arrives")
+    ap.add_argument("--expect-timeout", type=float, default=15.0)
     ap.add_argument("--log")
     args = ap.parse_args()
 
@@ -236,6 +268,21 @@ def main():
                     time.sleep(RECORD_GAP)
 
         dev.carrier(0)
+
+        if args.expect:
+            dev.baud(args.baud)
+            log = open(args.log, "wb") if args.log else None
+            try:
+                ok = await_line(dev, args.expect, args.expect_timeout, log)
+            finally:
+                if log:
+                    log.close()
+                dev.baud(0)
+            if not ok:
+                print(f"TIMEOUT: no {args.expect!r} within "
+                      f"{args.expect_timeout:g}s", file=sys.stderr)
+                sys.exit(1)
+            return
 
         if args.no_forward:
             dev.baud(0)

@@ -8,6 +8,7 @@
 #include "reset.h"
 #include "darwin.h"
 #include "cetus.h"
+#include "log.h"
 
 /*
  * Fastboot protocol.
@@ -627,9 +628,15 @@ static void cmd_upload(void)
             if (chunk > CETUS_DUMP_CHUNK)
                 chunk = CETUS_DUMP_CHUNK;
 
-            if (cetus_read((u32)(upload_src.addr + done), download_buf,
-                           chunk, 4) != 0)
-                return;     /* mid data phase; too late to FAIL */
+            {
+                int rc = cetus_read((u32)(upload_src.addr + done),
+                                    download_buf, chunk, 4);
+                if (rc != 0) {
+                    mira_logx("cetus upload stalled at", done);
+                    mira_logx("  rc", (u64)(u32)-rc);
+                    return;
+                }
+            }     /* mid data phase; too late to FAIL */
 
             usb_bulk_send(download_buf, chunk);
             done += chunk;
@@ -1662,6 +1669,13 @@ static void cmd_cetus_load(const char *args)
     fb_result(line);
 }
 
+/*
+ * `oem cetus dumpbrom` -- stage the CP's mask ROM for `get_staged`.
+ *
+ * The same window as the AP's own, and the only way to read it: the CP has no
+ * Linux to dump it from, and the byte-sum trick that first recovered it cost a
+ * round trip per byte.
+ */
 #define CETUS_BROM_BASE 0xFFFF0000u
 #define CETUS_BROM_SIZE 0xC000u
 
@@ -1674,6 +1688,7 @@ static void cmd_cetus_dumpbrom(void)
         return;
     }
 
+    mira_log("dumpbrom armed");
     upload_src.kind = UPLOAD_CETUS;
     upload_src.addr = CETUS_BROM_BASE;
     upload_src.len  = CETUS_BROM_SIZE;
@@ -1681,13 +1696,6 @@ static void cmd_cetus_dumpbrom(void)
     fb_result("hint: fastboot get_staged cetus_brom.bin");
 }
 
-/*
- * `oem cetus dumpnor[:<off>[:<len>]]` -- stage the CP's raw NOR.
- *
- * Needs the payload from payloads/cetus loaded first, since the flash is only
- * reachable by code running on the CP. Contents are whatever is on the part,
- * decrypted by nobody.
- */
 static void cmd_cetus_rate(const char *args)
 {
     const char *p = args;
@@ -1757,6 +1765,13 @@ static void cmd_cetus_norcmd(const char *args)
     fb_result(line);
 }
 
+/*
+ * `oem cetus dumpnor[:<off>[:<len>]]` -- stage the CP's raw NOR.
+ *
+ * The flash is only reachable by code running on the CP, so this needs the
+ * bundled payload up. Contents are whatever is on the part, decrypted by
+ * nobody.
+ */
 static void cmd_cetus_dumpnor(const char *args)
 {
     const char *p = args;
