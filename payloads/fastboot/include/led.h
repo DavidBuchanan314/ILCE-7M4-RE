@@ -74,8 +74,9 @@ __attribute__((noreturn)) void led_fail(u32 code);
 
 /*
  * USB activity indicator. led_activity() is called when the controller does
- * something and lights the LED; led_activity_tick() puts it out again once
- * the traffic stops. Neither waits, so both are safe in the hot path.
+ * something; led_activity_tick() blinks while the traffic keeps coming and
+ * puts the LED out once it stops. Neither waits, so both are safe in the hot
+ * path.
  *
  * Idle is dark. Errors are reported over the UART now, not blinked -- the CP
  * link is up well before USB, so anything USB can fail at has a better

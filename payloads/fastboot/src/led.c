@@ -83,32 +83,53 @@ void led_fail(u32 code)
         led_count(code);
 }
 
-/*
- * Long enough to see a single packet, short enough that a busy link reads as
- * lit rather than as flicker.
- */
-#define ACTIVITY_MS     30
+#define MS_TICKS(ms)    ((ms) * (TIMER0_HZ / 1000))
 
-static u32 act_start;
+/* Must outlast the gaps inside a transfer: a NOR dump spends ~100 ms per chunk
+ * on the CP link with nothing pumping USB events. */
+#define ACTIVITY_HOLD_MS 200
+
+/* 2^18 ticks is 65.5 ms at 4 MHz. */
+#define ACTIVITY_BLINK_SHIFT 18
+
+static u32 act_last;
+static int act_busy;
 static int act_lit;
+
+static void act_set(int on)
+{
+    act_lit = on;
+    if (on)
+        led_on();
+    else
+        led_off();
+}
 
 void led_activity(void)
 {
-    act_start = timer_ticks();
-    if (!act_lit) {
-        led_on();
-        act_lit = 1;
-    }
+    act_last = timer_ticks();
+    act_busy = 1;
 }
 
 void led_activity_tick(void)
 {
-    if (!act_lit)
+    u32 now;
+    int want;
+
+    if (!act_busy)
         return;
-    if (timer_ticks() - act_start < ACTIVITY_MS * (TIMER0_HZ / 1000))
+
+    now = timer_ticks();
+
+    if (now - act_last >= MS_TICKS(ACTIVITY_HOLD_MS)) {
+        act_busy = 0;
+        act_set(0);
         return;
-    led_off();
-    act_lit = 0;
+    }
+
+    want = (int)((now >> ACTIVITY_BLINK_SHIFT) & 1);
+    if (want != act_lit)
+        act_set(want);
 }
 
 void led_panic(void)

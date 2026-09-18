@@ -373,7 +373,7 @@ static struct {
 
 /* One monitor command per chunk, so a stalled read cannot wedge the whole
  * transfer and USB keeps getting serviced between them. */
-#define CETUS_NOR_CHUNK     0x10000u
+#define CETUS_NOR_CHUNK     0x1000u
 #define CETUS_FLASH_SIZE    0x4000000u
 
 /* One monitor command per chunk; small enough to keep USB serviced. */
