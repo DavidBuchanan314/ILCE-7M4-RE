@@ -42,7 +42,33 @@
 #define RST_USB_ALL         (RST_USB_AXI | RST_USB_APB | \
                              RST_USB_U2PHY | RST_USB_U31PHY)
 
+/* Clock gate bank 0x50: UARTs, SPIs, I2Cs. SPI0 is bit 12. */
+#define SCU_CLK_PERI_STS    (SCU_BASE + 0x050)
+#define SCU_CLK_PERI_SET    (SCU_BASE + 0x054)
+#define SCU_CLK_PERI_CLR    (SCU_BASE + 0x058)
+
+#define CLK_SPI0            BIT(12)
+
+/* Clock source select bank 0x230. SPI0 takes bits 1:0; 0 selects fix_pll4_48. */
+#define SCU_CLKSEL_SPI_STS  (SCU_BASE + 0x230)
+#define SCU_CLKSEL_SPI_SET  (SCU_BASE + 0x234)
+#define SCU_CLKSEL_SPI_CLR  (SCU_BASE + 0x238)
+
+#define CLKSEL_SPI0_MASK    0x3u
+
+/* Reset bank 5 (reset ids 160..191). SPI0 ids 172, 173. */
+#define SCU_RST5_STS        (SCU_BASE + 0x350)
+#define SCU_RST5_ASSERT     (SCU_BASE + 0x354)
+#define SCU_RST5_DEASSERT   (SCU_BASE + 0x358)
+
+#define RST_SPI0_SSP        BIT(12)
+#define RST_SPI0_APB        BIT(13)
+
 /* Read-only boot-mode / strap register. Bit 0 doubles as BOOT_SERIAL_IN. */
 #define SCU_BOOTMODE        (SCU_BASE + 0xF10)
+
+/* The CP's reset and boot-source select. Both writable, unlike our own. */
+#define SCU_CP_RESET        (SCU_BASE + 0xF1C)
+#define SCU_CP_BOOTMODE     (SCU_BASE + 0xF20)
 
 #endif /* FASTBOOT_SCU_H */

@@ -27,18 +27,38 @@ CFLAGS := -march=armv8-a -mgeneral-regs-only -mbranch-protection=none \
 LDFLAGS := -T $(TARGET).ld -nostdlib -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map \
            -Wl,--build-id=none -Wl,--no-warn-rwx-segments
 
+# The CP payload ships inside this image: built here, linked in as a blob, and
+# pushed to the co-processor during init so nothing has to be staged by hand.
+CETUS_DIR := cetus
+CETUS_BIN := $(CETUS_DIR)/build/cetus.bin
+CETUS_OBJ := $(BUILD)/cetus_payload.o
+
 SRCS_C := $(wildcard src/*.c)
 SRCS_S := $(wildcard src/*.S)
 OBJS   := $(patsubst src/%.S,$(BUILD)/%.o,$(SRCS_S)) \
-          $(patsubst src/%.c,$(BUILD)/%.o,$(SRCS_C))
+          $(patsubst src/%.c,$(BUILD)/%.o,$(SRCS_C)) \
+          $(CETUS_OBJ)
 
-.PHONY: all clean disasm push
+.PHONY: all clean disasm push cetus
 
 all: $(BUILD)/$(TARGET).bin
 
 $(BUILD)/$(TARGET).bin: $(BUILD)/$(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
 	@echo "=== $@: $$(stat -c%s $@) bytes ==="
+
+cetus:
+	$(MAKE) -C $(CETUS_DIR)
+
+$(CETUS_BIN): cetus
+
+# objcopy names its symbols after the input path, so the blob is copied to a
+# fixed name first and converted from inside $(BUILD) to keep them stable.
+$(CETUS_OBJ): $(CETUS_BIN) | $(BUILD)
+	cp $< $(BUILD)/cetus_payload.bin
+	cd $(BUILD) && $(OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 \
+	  --rename-section .data=.rodata,alloc,load,readonly,data,contents \
+	  cetus_payload.bin cetus_payload.o
 
 $(BUILD)/$(TARGET).elf: $(OBJS) $(TARGET).ld
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS)
@@ -67,3 +87,4 @@ push: $(BUILD)/$(TARGET).bin
 
 clean:
 	rm -rf $(BUILD)
+	$(MAKE) -C $(CETUS_DIR) clean

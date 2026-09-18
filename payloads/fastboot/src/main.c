@@ -6,6 +6,7 @@
 #include "usb.h"
 #include "sdhci.h"
 #include "darwin.h"
+#include "cetus.h"
 
 /*
  * Milestone: get the D+ pullup up, and report precisely how far we got.
@@ -61,6 +62,20 @@ int main(void)
     /* Idle the Darwin chip select. Sends nothing -- the link is only used
      * once a command asks for it. */
     darwin_init();
+
+    /*
+     * Take the CP and put our own payload on it.
+     *
+     * Left alone it boots from NOR and its firmware reconfigures the flash,
+     * and none of that is undone by a later reset. Resetting it into the ROM
+     * monitor and immediately replacing that with the bundled payload means
+     * the flash commands are available from the first command, with nothing
+     * to stage by hand.
+     *
+     * A failure is not fatal -- USB is the more useful of the two, and it is
+     * also the only way to find out what went wrong. `oem cetus` reports it.
+     */
+    cetus_bring_up();
 
     usb_phy_init();
 

@@ -7,6 +7,7 @@
 #include "dwc3.h"
 #include "reset.h"
 #include "darwin.h"
+#include "cetus.h"
 
 /*
  * Fastboot protocol.
@@ -344,6 +345,8 @@ enum upload_kind {
     UPLOAD_NONE = 0,
     UPLOAD_MMC,         /* stream off the card   */
     UPLOAD_MEM,         /* stream out of memory  */
+    UPLOAD_CETUS,       /* stream CP memory over the monitor link */
+    UPLOAD_CETUS_NOR,   /* stream CP NOR, a window at a time      */
 };
 
 static struct {
@@ -352,11 +355,19 @@ static struct {
     u32 start;          /* MMC: absolute start sector */
     u32 sectors;        /* MMC: how many to send      */
     int decrypt;        /* MMC: unwrap the partition AES-XTS on the way out */
-    u64 addr;           /* MEM: source address        */
-    u32 len;            /* MEM: byte count            */
+    u64 addr;           /* MEM/CETUS: source address  */
+    u32 len;            /* MEM/CETUS: byte count      */
 } upload_src;
 
 #define DUMP_CHUNK_SECTORS  (64 * 1024 / SECTOR_SIZE)   /* 64 KiB per read */
+
+/* One monitor command per chunk, so a stalled read cannot wedge the whole
+ * transfer and USB keeps getting serviced between them. */
+#define CETUS_NOR_CHUNK     0x10000u
+#define CETUS_FLASH_SIZE    0x4000000u
+
+/* One monitor command per chunk; small enough to keep USB serviced. */
+#define CETUS_DUMP_CHUNK    4096
 
 /* Copy the next whitespace-delimited token, returning where it stopped. */
 static const char *parse_token(const char *s, char *out, u32 max)
@@ -572,6 +583,53 @@ static void cmd_upload(void)
 
             for (i = 0; i < chunk; i += 4)
                 *out++ = read32(upload_src.addr + done + i);
+
+            usb_bulk_send(download_buf, chunk);
+            done += chunk;
+        }
+
+        fb_okay("");
+        return;
+    }
+
+    if (upload_src.kind == UPLOAD_CETUS_NOR) {
+        n = str_copy(line, "DATA", 4);
+        n += hex_format(line + n, upload_src.len, 8);
+        usb_bulk_send(line, n);
+
+        while (done < upload_src.len) {
+            u32 chunk = upload_src.len - done;
+
+            if (chunk > CETUS_NOR_CHUNK)
+                chunk = CETUS_NOR_CHUNK;
+
+            /* Mid data phase; a FAIL can no longer be sent. */
+            if (cetus_nor_read((u32)upload_src.addr + done, download_buf,
+                               chunk) != 0)
+                return;
+
+            usb_bulk_send(download_buf, chunk);
+            done += chunk;
+        }
+
+        fb_okay("");
+        return;
+    }
+
+    if (upload_src.kind == UPLOAD_CETUS) {
+        n = str_copy(line, "DATA", 4);
+        n += hex_format(line + n, upload_src.len, 8);
+        usb_bulk_send(line, n);
+
+        while (done < upload_src.len) {
+            u32 chunk = upload_src.len - done;
+
+            if (chunk > CETUS_DUMP_CHUNK)
+                chunk = CETUS_DUMP_CHUNK;
+
+            if (cetus_read((u32)(upload_src.addr + done), download_buf,
+                           chunk, 4) != 0)
+                return;     /* mid data phase; too late to FAIL */
 
             usb_bulk_send(download_buf, chunk);
             done += chunk;
@@ -1344,6 +1402,479 @@ static void cmd_darwin(const char *args)
     fb_fail("usage: oem darwin [peek:<addr>[:<len>]]");
 }
 
+/* ---- oem cetus ---------------------------------------------------------- */
+
+static u8 cetus_buf[0x200];
+
+static void cetus_fail(const char *what, int rc)
+{
+    char line[FB_RESPONSE_MAX];
+    u32 n = 0;
+
+    if (rc == CETUS_E_RDY) {
+        fb_fail("no reply from the CP (try: oem cetus reset)");
+        return;
+    }
+
+    n += str_copy(line + n, what, FB_RESPONSE_MAX - n);
+    if (CETUS_IS_STATUS(rc)) {
+        n += str_copy(line + n, ": target status ", 20);
+        n += hex_format(line + n, CETUS_STATUS(rc), 2);
+    } else {
+        n += str_copy(line + n, ": rc ", 8);
+        n += dec_format(line + n, (u32)(-rc));
+    }
+    line[n] = 0;
+    fb_fail(line);
+}
+
+static void cetus_report_link(void)
+{
+    char line[FB_RESPONSE_MAX];
+    u32 n = 0;
+
+    n += str_copy(line + n, "reset ", FB_RESPONSE_MAX);
+    n += hex_format(line + n, cetus_reset_state(), 8);
+    n += str_copy(line + n, "  bootmode ", 16);
+    n += hex_format(line + n, cetus_bootmode_state(), 8);
+    line[n] = 0;
+    fb_info(line);
+}
+
+static void cetus_report_payload(void)
+{
+    char line[FB_RESPONSE_MAX];
+    u32 id, n = 0, i;
+
+    if (cetus_payload_state() != 0) {
+        fb_info("payload not running (ROM monitor only)");
+        return;
+    }
+    if (cetus_nor_id(&id) != 0) {
+        fb_info("payload running, flash not answering");
+        return;
+    }
+
+    /* In the order the bytes arrive -- manufacturer, type, density -- which
+     * is how a datasheet lists them. Printing the assembled word instead
+     * reverses them and reads like a different part entirely. */
+    n += str_copy(line + n, "payload running, flash ", FB_RESPONSE_MAX);
+    for (i = 0; i < 3; i++) {
+        n += hex_format(line + n, (id >> (8 * i)) & 0xFF, 2);
+        line[n++] = ' ';
+    }
+    line[n] = 0;
+    fb_info(line);
+}
+
+static void cmd_cetus_state(void)
+{
+    int rc;
+
+    cetus_spi_init();
+    cetus_report_link();
+
+    rc = cetus_status();
+    if (rc != 0) {
+        cetus_fail("status check failed", rc);
+        return;
+    }
+    cetus_report_payload();
+    fb_okay("");
+}
+
+/*
+ * Reset the CP and put the bundled payload back on it -- the same thing init
+ * does. There is no command for the bare ROM monitor because the payload
+ * answers everything it does and more.
+ */
+static void cmd_cetus_reset(void)
+{
+    int rc = cetus_bring_up();
+
+    cetus_report_link();
+
+    if (rc != 0) {
+        cetus_fail("bring-up failed", rc);
+        return;
+    }
+    cetus_report_payload();
+    fb_okay("");
+}
+
+static void cetus_dump(u32 addr, const u8 *buf, u32 len, u32 width)
+{
+    u32 per_line = (width == 1) ? 8 : 16;
+    u32 off;
+
+    for (off = 0; off < len; off += per_line) {
+        char line[FB_RESPONSE_MAX];
+        u32 n = 0, i;
+
+        n += hex_format(line + n, addr + off, 8);
+        line[n++] = ':';
+
+        for (i = 0; i < per_line && off + i < len; i += width) {
+            u32 v = 0, k;
+
+            for (k = 0; k < width; k++)
+                v |= (u32)buf[off + i + k] << (8 * k);
+            line[n++] = ' ';
+            n += hex_format(line + n, v, (int)(width * 2));
+        }
+        line[n] = 0;
+        fb_info(line);
+    }
+}
+
+static int cetus_parse_width(const char *p, u32 *width)
+{
+    if (*p != ':')
+        return 0;
+    *width = (u32)hex_parse(p + 1, 0);
+    return (*width == 1 || *width == 2 || *width == 4) ? 0 : -1;
+}
+
+static void cmd_cetus_peek(const char *args)
+{
+    const char *p;
+    u32 addr, len = 16, width = 4;
+    int rc;
+
+    addr = (u32)hex_parse(args, &p);
+    if (p == args) {
+        fb_fail("usage: oem cetus peek:<addr>[:<len>[:<width>]]");
+        return;
+    }
+    if (*p == ':') {
+        len = (u32)hex_parse(p + 1, &p);
+        if (cetus_parse_width(p, &width) != 0) {
+            fb_fail("width must be 1, 2 or 4");
+            return;
+        }
+    }
+    if (len == 0 || len > sizeof(cetus_buf)) {
+        fb_fail("bad length (max 0x200)");
+        return;
+    }
+    if (len % width || addr % width) {
+        fb_fail("address and length must be width-aligned");
+        return;
+    }
+
+    rc = cetus_read(addr, cetus_buf, len, width);
+    if (rc != 0) {
+        cetus_fail("read failed", rc);
+        return;
+    }
+
+    cetus_dump(addr, cetus_buf, len, width);
+    fb_okay("");
+}
+
+static void cmd_cetus_poke(const char *args)
+{
+    const char *p;
+    u32 addr, value, width = 4, i;
+    u8 val[4], back[4];
+    char line[FB_RESPONSE_MAX];
+    u32 n = 0;
+    int rc;
+
+    addr = (u32)hex_parse(args, &p);
+    if (*p != ':') {
+        fb_fail("usage: oem cetus poke:<addr>:<val>[:<width>]");
+        return;
+    }
+    value = (u32)hex_parse(p + 1, &p);
+    if (cetus_parse_width(p, &width) != 0) {
+        fb_fail("width must be 1, 2 or 4");
+        return;
+    }
+    if (addr % width) {
+        fb_fail("address must be width-aligned");
+        return;
+    }
+
+    for (i = 0; i < width; i++)
+        val[i] = (u8)(value >> (8 * i));
+
+    rc = cetus_write(addr, val, width, width);
+    if (rc != 0) {
+        cetus_fail("write failed", rc);
+        return;
+    }
+
+    n += str_copy(line + n, "wrote ", FB_RESPONSE_MAX);
+    n += hex_format(line + n, value, (int)(width * 2));
+    n += str_copy(line + n, " -> ", 8);
+    n += hex_format(line + n, addr, 8);
+
+    if (cetus_read(addr, back, width, width) == 0) {
+        u32 v = 0;
+
+        for (i = 0; i < width; i++)
+            v |= (u32)back[i] << (8 * i);
+        n += str_copy(line + n, " readback ", 16);
+        n += hex_format(line + n, v, (int)(width * 2));
+    }
+    line[n] = 0;
+    fb_result(line);
+}
+
+static void cmd_cetus_load(const char *args)
+{
+    const char *p;
+    u32 addr = (u32)hex_parse(args, &p);
+    u32 len;
+    char line[FB_RESPONSE_MAX];
+    u32 n = 0;
+    int rc;
+
+    if (p == args) {
+        fb_fail("usage: oem cetus load:<addr>");
+        return;
+    }
+    if (addr & 3) {
+        fb_fail("address must be 4-byte aligned");
+        return;
+    }
+    if (download_len == 0) {
+        fb_fail("nothing staged; download first");
+        return;
+    }
+
+    len = (download_len + 3) & ~3u;
+    while (download_len < len)
+        download_buf[download_len++] = 0;
+
+    rc = cetus_write(addr, download_buf, len, 4);
+    if (rc != 0) {
+        cetus_fail("load failed", rc);
+        return;
+    }
+
+    n += str_copy(line + n, "loaded ", FB_RESPONSE_MAX);
+    n += hex_format_min(line + n, len);
+    n += str_copy(line + n, " bytes -> ", 16);
+    n += hex_format(line + n, addr, 8);
+    line[n] = 0;
+    fb_result(line);
+}
+
+#define CETUS_BROM_BASE 0xFFFF0000u
+#define CETUS_BROM_SIZE 0xC000u
+
+static void cmd_cetus_dumpbrom(void)
+{
+    int rc = cetus_status();
+
+    if (rc != 0) {
+        cetus_fail("status check failed", rc);
+        return;
+    }
+
+    upload_src.kind = UPLOAD_CETUS;
+    upload_src.addr = CETUS_BROM_BASE;
+    upload_src.len  = CETUS_BROM_SIZE;
+
+    fb_result("hint: fastboot get_staged cetus_brom.bin");
+}
+
+/*
+ * `oem cetus dumpnor[:<off>[:<len>]]` -- stage the CP's raw NOR.
+ *
+ * Needs the payload from payloads/cetus loaded first, since the flash is only
+ * reachable by code running on the CP. Contents are whatever is on the part,
+ * decrypted by nobody.
+ */
+static void cmd_cetus_rate(const char *args)
+{
+    const char *p = args;
+    u32 sel, cpsdvsr = 2, scr = 0, n = 0;
+    char line[FB_RESPONSE_MAX];
+
+    sel = (u32)hex_parse(p, &p);
+    if (*p == ':') {
+        cpsdvsr = (u32)hex_parse(p + 1, &p);
+        if (*p == ':')
+            scr = (u32)hex_parse(p + 1, 0);
+    }
+
+    if (cetus_set_rate(sel, cpsdvsr, scr) != 0) {
+        fb_fail("usage: oem cetus rate:<sel 0-2>:<cpsdvsr even>:<scr>");
+        return;
+    }
+
+    n += str_copy(line + n, "sck ", FB_RESPONSE_MAX);
+    n += dec_format(line + n, cetus_rate_khz());
+    n += str_copy(line + n, " kHz", 8);
+    line[n] = 0;
+    fb_result(line);
+}
+
+/*
+ * `oem cetus norcmd:<op>[:<len>[:<dummy>[:<addr>]]]` -- issue one flash
+ * command and print what comes back. Identifying the part and reading SFDP
+ * both need this, and neither goes anywhere near the read path.
+ */
+static void cmd_cetus_norcmd(const char *args)
+{
+    const char *p = args;
+    u32 op, len = 1, dummy = 0, addr = 0, use_addr = 0, i, n = 0;
+    u8 buf[8];
+    char line[FB_RESPONSE_MAX];
+    int rc;
+
+    op = (u32)hex_parse(p, &p);
+    if (*p == ':') {
+        len = (u32)hex_parse(p + 1, &p);
+        if (*p == ':') {
+            dummy = (u32)hex_parse(p + 1, &p);
+            if (*p == ':') {
+                addr = (u32)hex_parse(p + 1, 0);
+                use_addr = 1;
+            }
+        }
+    }
+
+    if (len == 0 || len > sizeof(buf)) {
+        fb_fail("length must be 1..8");
+        return;
+    }
+
+    rc = cetus_nor_cmd((u8)op, (u8)dummy, (u8)len, addr, (int)use_addr, buf);
+    if (rc != 0) {
+        cetus_fail("flash command failed", rc);
+        return;
+    }
+
+    for (i = 0; i < len; i++) {
+        n += hex_format(line + n, buf[i], 2);
+        line[n++] = ' ';
+    }
+    line[n] = 0;
+    fb_result(line);
+}
+
+static void cmd_cetus_dumpnor(const char *args)
+{
+    const char *p = args;
+    u32 off = 0, len = CETUS_FLASH_SIZE;
+    char line[FB_RESPONSE_MAX];
+    u32 n = 0;
+    int rc;
+
+    if (*p == ':') {
+        off = (u32)hex_parse(p + 1, &p);
+        len = CETUS_FLASH_SIZE - off;
+        if (*p == ':')
+            len = (u32)hex_parse(p + 1, 0);
+    }
+
+    if (off >= CETUS_FLASH_SIZE || len == 0 ||
+        len > CETUS_FLASH_SIZE - off || (off | len) & 3) {
+        fb_fail("bad range (64 MiB flash, 4-byte aligned)");
+        return;
+    }
+
+    /* Prove the payload is there and the flash answers before arming: a
+     * failure during the upload itself can only truncate the transfer. */
+    rc = cetus_nor_read(off, cetus_buf, 0x40);
+    if (rc != 0) {
+        cetus_fail("no NOR read (see: oem cetus)", rc);
+        return;
+    }
+
+    upload_src.kind = UPLOAD_CETUS_NOR;
+    upload_src.addr = off;
+    upload_src.len  = len;
+
+    n += str_copy(line + n, "staged ", FB_RESPONSE_MAX);
+    n += hex_format_min(line + n, len);
+    n += str_copy(line + n, " bytes; fastboot get_staged nor.bin", 40);
+    line[n] = 0;
+    fb_result(line);
+}
+
+static void cmd_cetus_exec(const char *args)
+{
+    const char *p;
+    u32 addr;
+    char line[FB_RESPONSE_MAX];
+    u32 n;
+    int rc;
+
+    addr = (u32)hex_parse(args, &p);
+    if (p == args) {
+        fb_fail("usage: oem cetus exec:<addr>");
+        return;
+    }
+    if (addr & 3) {
+        fb_fail("address must be 4-byte aligned");
+        return;
+    }
+
+    n = str_copy(line, "entering ", FB_RESPONSE_MAX);
+    n += hex_format(line + n, addr, 8);
+    line[n] = 0;
+    fb_info(line);
+
+    rc = cetus_entry(addr);
+    if (rc != 0) {
+        cetus_fail("entry failed", rc);
+        return;
+    }
+    fb_result("entered");
+}
+
+static void cmd_cetus(const char *args)
+{
+    const char *rest;
+
+    if (str_eq(args, "")) {
+        cmd_cetus_state();
+        return;
+    }
+    if (str_eq(args, " reset")) {
+        cmd_cetus_reset();
+        return;
+    }
+    if ((rest = str_after(args, " peek:")) != 0) {
+        cmd_cetus_peek(rest);
+        return;
+    }
+    if ((rest = str_after(args, " poke:")) != 0) {
+        cmd_cetus_poke(rest);
+        return;
+    }
+    if ((rest = str_after(args, " exec:")) != 0) {
+        cmd_cetus_exec(rest);
+        return;
+    }
+    if (str_eq(args, " dumpbrom")) {
+        cmd_cetus_dumpbrom();
+        return;
+    }
+    if ((rest = str_after(args, " load:")) != 0) {
+        cmd_cetus_load(rest);
+        return;
+    }
+    if ((rest = str_after(args, " rate:")) != 0) {
+        cmd_cetus_rate(rest);
+        return;
+    }
+    if ((rest = str_after(args, " norcmd:")) != 0) {
+        cmd_cetus_norcmd(rest);
+        return;
+    }
+    if ((rest = str_after(args, " dumpnor")) != 0) {
+        cmd_cetus_dumpnor(rest);
+        return;
+    }
+    fb_fail("usage: oem cetus [reset|peek:|poke:|exec:|load:|dumpbrom|dumpnor|norcmd:]");
+}
+
 /* ---- oem help ----------------------------------------------------------- */
 
 static void cmd_help(void)
@@ -1357,6 +1888,16 @@ static void cmd_help(void)
     fb_info("dumpbrom             stage the bootrom for get_staged");
     fb_info("darwin               show the Virtual WDT state");
     fb_info("darwin peek:<addr>[:<len>]   read Darwin memory");
+    fb_info("cetus                show the CP monitor link state");
+    fb_info("cetus reset          reset the CP and restart its payload");
+    fb_info("cetus peek:<addr>[:<len>[:<width>]]");
+    fb_info("cetus poke:<addr>:<val>[:<width>]");
+    fb_info("cetus exec:<addr>    hand the CP over to addr");
+    fb_info("cetus norcmd:<op>[:<len>[:<dummy>[:<addr>]]]");
+    fb_info("cetus rate:<sel>:<cpsdvsr>[:<scr>]   set link SCK");
+    fb_info("cetus dumpbrom       stage the CP bootrom for get_staged");
+    fb_info("cetus load:<addr>    write the staged download to CP memory");
+    fb_info("cetus dumpnor[:<off>[:<len>]]   stage the CP NOR");
 
     fb_okay("");
 }
@@ -1395,6 +1936,10 @@ static void cmd_oem(const char *args)
     }
     if ((rest = str_after(args, "darwin")) != 0) {
         cmd_darwin(rest);
+        return;
+    }
+    if ((rest = str_after(args, "cetus")) != 0) {
+        cmd_cetus(rest);
         return;
     }
     fb_fail("unknown oem command (try: oem help)");
