@@ -73,29 +73,16 @@ void led_count(u32 n);
 __attribute__((noreturn)) void led_fail(u32 code);
 
 /*
- * Non-blocking status blinker. Call it often -- from inside the event loop --
- * and it advances its own pattern from the timer, never waiting.
+ * USB activity indicator. led_activity() is called when the controller does
+ * something and lights the LED; led_activity_tick() puts it out again once
+ * the traffic stops. Neither waits, so both are safe in the hot path.
  *
- * This exists because every blocking LED routine here doubles as a way to kill
- * the thing being debugged: led_fail() loops forever and stops servicing USB,
- * which takes ep0 (and with it the status-descriptor channel) down too. A
- * heartbeat that never blocks reports state no matter what else is wedged.
- *
- * Pattern: `code` short blips, then a 2 s gap, repeating.
+ * Idle is dark. Errors are reported over the UART now, not blinked -- the CP
+ * link is up well before USB, so anything USB can fail at has a better
+ * channel than a blink count.
  */
-void led_heartbeat(u32 code);
-
-/*
- * Timer-INDEPENDENT liveness toggle. Driven purely by a call counter, so it
- * blinks whenever the CPU is executing, even if timer0 has stopped. That is
- * the one thing led_heartbeat() cannot report: every path in it except the
- * first call needs timer_ticks() to advance, so a frozen timer and a stalled
- * CPU both present as a solid LED.
- *
- *   blinking  -> CPU is looping; suspect the timer
- *   solid     -> CPU is not executing; suspect a stalled MMIO access
- */
-void led_spin_tick(void);
+void led_activity(void);
+void led_activity_tick(void);
 
 /* Fast even blinking, forever. Terminal state for an unrecoverable error. */
 __attribute__((noreturn)) void led_panic(void);

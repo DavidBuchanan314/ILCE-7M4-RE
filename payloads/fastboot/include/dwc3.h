@@ -89,6 +89,10 @@ void dwc3_ep_disable(u32 phys_ep);
  * *rsc_idx (needed later for ENDTRANSFER), or negative on failure. */
 int dwc3_ep_start_xfer(u32 phys_ep, u64 trb_addr, u32 *rsc_idx);
 
+/* ENDTRANSFER, using the resource index STARTTRANSFER handed back. Cancels a
+ * queued transfer so it cannot complete later with stale data. */
+int dwc3_ep_end_xfer(u32 phys_ep, u32 rsc_idx);
+
 int dwc3_ep_set_stall(u32 phys_ep);
 int dwc3_ep_clear_stall(u32 phys_ep);
 

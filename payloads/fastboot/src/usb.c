@@ -541,10 +541,10 @@ int usb_gadget_init(void)
 /* Coarse "how far did we get" marker, reported by the LED heartbeat. */
 volatile u32 usb_state = USB_STATE_UNCONFIGURED;
 
-/* Keeps the heartbeat alive while dwc3_depcmd() waits on the controller. */
+/* Lets the activity light go out while dwc3_depcmd() waits on the controller. */
 void dwc3_wait_tick(void)
 {
-    led_spin_tick();
+    led_activity_tick();
 }
 
 void usb_event_pump(void)
@@ -552,24 +552,7 @@ void usb_event_pump(void)
     u32 event;
     int budget = 64;
 
-    /*
-     * While ep0 sits armed and idle, blink the controller's LINK STATE instead
-     * of the trace code. The trace already told us the SETUP is armed and the
-     * command succeeded, so the remaining question is what the link itself is
-     * doing -- if it is in SUSPEND or RESET rather than ON, no SETUP will ever
-     * be delivered no matter how correct the gadget logic is.
-     *
-     * Blinked as linkstate + 1 so that state 0 (ON, the healthy value) is one
-     * blip rather than none:
-     *   1 = U0/ON      3 = U2/SLEEP    4 = U3/SUSPEND
-     *   6 = early susp 15 = RESET      16 = RESUME
-     */
-    if (usb_state == EP0_TRACE_ARMED) {
-        u32 dsts = read32(DWC3_DSTS);
-        led_heartbeat(DWC3_DSTS_USBLNKST(dsts) + 1);
-    } else {
-        led_heartbeat(usb_state);
-    }
+    led_activity_tick();
 
     /* Drain rather than taking one event per call: the buffer is only 4 KB and
      * nothing consumes it while an endpoint command is waiting. The budget
@@ -578,6 +561,8 @@ void usb_event_pump(void)
         event = dwc3_event_poll();
         if (!event)
             return;
+
+        led_activity();
 
         if (DWC3_EVENT_IS_DEVT(event))
             handle_devt(event);
@@ -614,6 +599,9 @@ void usb_bulk_enable_pending(void)
  * indistinguishable from a hang. */
 int usb_bulk_error;
 
+/* Resource index per direction, so a queued transfer can be ended later. */
+static u32 bulk_rsc[2];
+
 static int bulk_queue(u32 phys_ep, const void *buf, u32 len, int is_in)
 {
     volatile struct dwc3_trb *trb = &bulk_trb[is_in ? 1 : 0];
@@ -627,18 +615,25 @@ static int bulk_queue(u32 phys_ep, const void *buf, u32 len, int is_in)
               | DWC3_TRB_CTRL_IOC
               | DWC3_TRB_CTRL_ISP_IMI;
     dma_wmb();
-    return dwc3_ep_start_xfer(phys_ep, (u64)(unsigned long)trb, 0);
+    return dwc3_ep_start_xfer(phys_ep, (u64)(unsigned long)trb,
+                              &bulk_rsc[is_in ? 1 : 0]);
 }
 
 /*
- * 5 s at the 4 MHz timer0 rate, applied ONLY to transfers the host has already
- * committed to. Receiving is not one of them: usb_bulk_recv() is how we wait
- * for the host to send a fastboot command, and that wait is open-ended -- the
- * host may sit idle indefinitely before anyone runs a command. Timing it out
- * treated normal idling as a failure and drove the device into led_fail(),
- * which stops servicing USB altogether, so every later command NAKed forever.
+ * Applied ONLY to transfers the host has already committed to. Receiving is
+ * not one of them: usb_bulk_recv() is how we wait for the host to send a
+ * fastboot command, and that wait is open-ended -- the host may sit idle
+ * indefinitely before anyone runs a command. Timing it out treated normal
+ * idling as a failure and halted the device, so every later command NAKed
+ * forever.
+ *
+ * Half a second is the deadline a host that is genuinely reading will never
+ * come near -- a 64-byte reply lands in microseconds and even a full upload
+ * chunk is a couple of milliseconds -- while being what a host that has gone
+ * away costs us before the endpoint is reclaimed. The slack is for the host
+ * stalling between reads of a long upload, not for the transfer itself.
  */
-#define BULK_TIMEOUT_TICKS  (5u * TIMER0_HZ)
+#define BULK_TIMEOUT_TICKS  (TIMER0_HZ / 2)
 
 u32 usb_bulk_recv(void *buf, u32 len)
 {
@@ -687,8 +682,49 @@ u32 usb_bulk_recv(void *buf, u32 len)
     }
 }
 
+/*
+ * Cancel anything queued on the bulk endpoints.
+ *
+ * A transfer left queued does not stay harmless: it completes whenever the
+ * host next reads, delivering a reply to a command nobody asked for, and from
+ * then on every answer is one behind.
+ */
+void usb_bulk_abort(void)
+{
+    if (bulk_in_busy) {
+        dwc3_ep_end_xfer(EP_IN, bulk_rsc[1]);
+        bulk_in_busy = 0;
+    }
+    if (bulk_out_busy) {
+        dwc3_ep_end_xfer(EP_OUT, bulk_rsc[0]);
+        bulk_out_busy = 0;
+    }
+}
+
+/*
+ * A host that stops reading mid-reply -- interrupted, killed, or piped into
+ * something that closed early -- is a client problem, not a device one, so it
+ * costs one aborted transfer rather than the session.
+ */
+int usb_bulk_recover(void)
+{
+    if (usb_bulk_error != USB_BULK_ERR_IN_TIMEOUT)
+        return -1;
+
+    usb_bulk_abort();
+    usb_bulk_error = 0;
+    usb_state = USB_STATE_FB_LOOP_TOP;
+    return 0;
+}
+
 u32 usb_bulk_send(const void *buf, u32 len)
 {
+    /* Once the host has stopped listening, the rest of this reply is going
+     * nowhere; spending the full deadline per line would turn one dropped
+     * response into minutes of stalling. */
+    if (usb_bulk_error)
+        return 0;
+
     for (;;) {
         u32 epoch, start;
 
@@ -710,6 +746,7 @@ u32 usb_bulk_send(const void *buf, u32 len)
             usb_event_pump();
             if (timer_ticks() - start > BULK_TIMEOUT_TICKS) {
                 usb_bulk_error = USB_BULK_ERR_IN_TIMEOUT;
+                usb_bulk_abort();
                 return 0;
             }
         }

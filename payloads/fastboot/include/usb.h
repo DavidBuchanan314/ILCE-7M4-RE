@@ -100,6 +100,13 @@ int usb_is_configured(void);
 
 extern int usb_bulk_error;
 
+/* Cancel queued bulk transfers. */
+void usb_bulk_abort(void);
+
+/* Clear a recoverable bulk error so the command loop can carry on. Returns 0
+ * if it recovered, negative if the error is not one it can. */
+int usb_bulk_recover(void);
+
 /*
  * Coarse progress marker, blinked continuously by the LED heartbeat so it is
  * readable even when USB itself is wedged.

@@ -379,6 +379,14 @@ int dwc3_ep_start_xfer(u32 phys_ep, u64 trb_addr, u32 *rsc_idx)
     return 0;
 }
 
+int dwc3_ep_end_xfer(u32 phys_ep, u32 rsc_idx)
+{
+    return dwc3_depcmd(phys_ep,
+                       DWC3_DEPCMD_ENDTRANSFER | DWC3_DEPCMD_HIPRI_FORCERM |
+                       DWC3_DEPCMD_CMDIOC | DWC3_DEPCMD_PARAM(rsc_idx),
+                       0, 0, 0);
+}
+
 int dwc3_ep_set_stall(u32 phys_ep)
 {
     return dwc3_depcmd(phys_ep, DWC3_DEPCMD_SETSTALL, 0, 0, 0);

@@ -2116,13 +2116,14 @@ void fastboot_loop(void)
         usb_bulk_enable_pending();
 
         /*
-         * If the bulk path is broken, keep servicing control traffic rather
-         * than stopping. led_fail() used to be called here, and because it
-         * loops forever without pumping events it took ep0 down with it --
-         * killing the status-descriptor channel that exists to diagnose this
-         * exact situation. The error is reported through string descriptor 4.
+         * A host that stopped reading mid-reply is recoverable: drop the
+         * abandoned transfer and take the next command. Anything else keeps
+         * servicing control traffic rather than stopping -- led_fail() used to
+         * be called here, and because it loops forever without pumping events
+         * it took ep0 down with it, killing the status-descriptor channel that
+         * exists to diagnose this exact situation.
          */
-        if (usb_bulk_error) {
+        if (usb_bulk_error && usb_bulk_recover() != 0) {
             usb_event_pump();
             continue;
         }

@@ -34,12 +34,17 @@
  * hung -- most likely an APB access to a block still held in reset.
  */
 
-#define STATE_UP_TCA_OK     3
-#define STATE_UP_TCA_FAIL   4
-#define FAIL_EP0_CONFIG     6
-#define FAIL_NOT_STARTED    5
-#define FAIL_NOT_DWC3       7
-#define FAIL_SOFTRESET      8
+/*
+ * USB comes up after the CP link, so anything that fails here has the UART to
+ * say so on and does not need a blink code. A solid LED just marks the halt as
+ * deliberate rather than a payload that never started.
+ */
+__attribute__((noreturn)) static void fatal(void)
+{
+    led_on();
+    for (;;)
+        ;
+}
 
 int main(void)
 {
@@ -104,14 +109,10 @@ int main(void)
     usb_phy_init();
 
     ret = dwc3_core_init();
-    if (ret != DWC3_OK)
+    if (ret != DWC3_OK) {
         mira_logx("dwc3 core init failed, rc", (u64)(u32)-ret);
-    if (ret == DWC3_ERR_NOT_DWC3)
-        led_fail(FAIL_NOT_DWC3);
-    if (ret == DWC3_ERR_SOFTRESET)
-        led_fail(FAIL_SOFTRESET);
-    if (ret != DWC3_OK)
-        led_panic();
+        fatal();
+    }
     mira_log("dwc3 core up");
 
     /*
@@ -121,19 +122,16 @@ int main(void)
      */
     if (usb_gadget_init() != 0) {
         mira_log("ep0 config failed");
-        led_fail(FAIL_EP0_CONFIG);
+        fatal();
     }
 
     ret = dwc3_connect();
     if (ret != DWC3_OK) {
         mira_logx("dwc3 connect failed, rc", (u64)(u32)-ret);
-        led_fail(FAIL_NOT_STARTED);
+        fatal();
     }
 
     mira_log("fastboot ready");
-
-    (void)STATE_UP_TCA_OK;
-    (void)STATE_UP_TCA_FAIL;
 
     /* Does not return. */
     usb_gadget_run();

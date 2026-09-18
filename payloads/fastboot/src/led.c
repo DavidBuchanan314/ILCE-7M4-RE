@@ -84,81 +84,31 @@ void led_fail(u32 code)
 }
 
 /*
- * Heartbeat cycle: a long marker flash, a pause, then `code` short blips, then
- * a long dark gap. The marker exists so the count has an unambiguous starting
- * point -- without it there is no way to tell which flash is the first.
+ * Long enough to see a single packet, short enough that a busy link reads as
+ * lit rather than as flicker.
  */
-#define HB_MARKER_ON_MS 1200
-#define HB_MARKER_OFF_MS 600
-#define HB_BLIP_ON_MS   250
-#define HB_BLIP_OFF_MS  350
-#define HB_GAP_MS       2500
+#define ACTIVITY_MS     30
 
-static u32 hb_code;
-static u32 hb_start;
-static u32 hb_step;
-static int hb_init;
+static u32 act_start;
+static int act_lit;
 
-/*
- * step 0        marker on
- * step 1        marker off
- * steps 2..2N+1 blips (even = on, odd = off)
- * step 2N+2     long gap, dark
- */
-void led_heartbeat(u32 code)
+void led_activity(void)
 {
-    u32 now = timer_ticks();
-    u32 last = 2 * code + 2;
-    u32 want_ms;
-
-    if (!hb_init || code != hb_code) {
-        hb_init = 1;
-        hb_code = code;
-        hb_step = 0;
-        hb_start = now;
+    act_start = timer_ticks();
+    if (!act_lit) {
         led_on();
-        return;
+        act_lit = 1;
     }
-
-    if (hb_step == 0)
-        want_ms = HB_MARKER_ON_MS;
-    else if (hb_step == 1)
-        want_ms = HB_MARKER_OFF_MS;
-    else if (hb_step >= last)
-        want_ms = HB_GAP_MS;
-    else
-        want_ms = (hb_step & 1) ? HB_BLIP_OFF_MS : HB_BLIP_ON_MS;
-
-    /* Unsigned subtraction stays correct across the counter wrap. */
-    if ((now - hb_start) < want_ms * (TIMER0_HZ / 1000))
-        return;
-
-    hb_start = now;
-    hb_step++;
-    if (hb_step > last)
-        hb_step = 0;
-
-    if (hb_step == 0)
-        led_on();                                   /* next marker */
-    else if (hb_step < last && hb_step >= 2 && !(hb_step & 1))
-        led_on();                                   /* blip on */
-    else
-        led_off();
 }
 
-static u32 spin_count;
-static int spin_on;
-
-void led_spin_tick(void)
+void led_activity_tick(void)
 {
-    /* ~a few Hz at typical spin rates; no timer involved. */
-    if ((++spin_count & 0x3ffff) != 0)
+    if (!act_lit)
         return;
-    spin_on = !spin_on;
-    if (spin_on)
-        led_on();
-    else
-        led_off();
+    if (timer_ticks() - act_start < ACTIVITY_MS * (TIMER0_HZ / 1000))
+        return;
+    led_off();
+    act_lit = 0;
 }
 
 void led_panic(void)

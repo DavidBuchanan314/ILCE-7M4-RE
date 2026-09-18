@@ -151,6 +151,7 @@
 #define DWC3_DEPCMD_STATUS(x)       (((x) >> 12) & 0x0f)
 #define DWC3_DEPCMD_CMDACT          BIT(10)
 #define DWC3_DEPCMD_CMDIOC          BIT(8)
+#define DWC3_DEPCMD_HIPRI_FORCERM   BIT(11)
 
 #define DWC3_DEPCMD_DEPSTARTCFG     0x09
 #define DWC3_DEPCMD_ENDTRANSFER     0x08
