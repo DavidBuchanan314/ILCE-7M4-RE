@@ -602,7 +602,9 @@ int cetus_println(const char *s)
     u32 len = 0, padded;
     int rc;
 
-    while (s[len] && len < sizeof(buf))
+    /* Leave room to round the length up to a word without running off the
+     * end, which a buffer size that is not a multiple of four would do. */
+    while (len < sizeof(buf) - 3 && s[len])
         len++;
     if (len == 0)
         return CETUS_E_ARG;

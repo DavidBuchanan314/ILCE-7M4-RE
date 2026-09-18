@@ -516,7 +516,7 @@ static void cmd_partition_dump(const char *args)
 
     rc = resolve_part(name, &dev, &start, &sectors, &encrypted);
     if (rc != 0) {
-       n = str_append(line, 0, sizeof(line), "cannot resolve ");
+        n = str_append(line, 0, sizeof(line), "cannot resolve ");
         n = str_append(line, n, sizeof(line), name);
         line[n] = 0;
         fb_fail(line);
@@ -545,7 +545,7 @@ static void cmd_partition_dump(const char *args)
     upload_src.decrypt = encrypted;
 
     /* The arming is silent; the only thing worth saying is what to run next. */
-   n = str_append(line, 0, sizeof(line), "hint: fastboot get_staged ");
+    n = str_append(line, 0, sizeof(line), "hint: fastboot get_staged ");
     n = str_append(line, n, sizeof(line), name);
     n = str_append(line, n, sizeof(line), ".bin");
     line[n] = 0;
@@ -569,7 +569,7 @@ static void cmd_upload(void)
     }
 
     if (upload_src.kind == UPLOAD_MEM) {
-       n = str_append(line, 0, sizeof(line), "DATA");
+        n = str_append(line, 0, sizeof(line), "DATA");
         n += hex_format(line + n, upload_src.len, 8);
         usb_bulk_send(line, n);
 
@@ -603,7 +603,7 @@ static void cmd_upload(void)
     }
 
     if (upload_src.kind == UPLOAD_CETUS_NOR) {
-       n = str_append(line, 0, sizeof(line), "DATA");
+        n = str_append(line, 0, sizeof(line), "DATA");
         n += hex_format(line + n, upload_src.len, 8);
         usb_bulk_send(line, n);
 
@@ -627,7 +627,7 @@ static void cmd_upload(void)
     }
 
     if (upload_src.kind == UPLOAD_CETUS) {
-       n = str_append(line, 0, sizeof(line), "DATA");
+        n = str_append(line, 0, sizeof(line), "DATA");
         n += hex_format(line + n, upload_src.len, 8);
         usb_bulk_send(line, n);
 
@@ -638,6 +638,7 @@ static void cmd_upload(void)
                 chunk = CETUS_DUMP_CHUNK;
 
             {
+                /* Mid data phase; a FAIL can no longer be sent. */
                 int rc = cetus_read((u32)(upload_src.addr + done),
                                     download_buf, chunk, 4);
                 if (rc != 0) {
@@ -645,7 +646,7 @@ static void cmd_upload(void)
                     mira_logx("  rc", (u64)(u32)-rc);
                     return;
                 }
-            }     /* mid data phase; too late to FAIL */
+            }
 
             usb_bulk_send(download_buf, chunk);
             done += chunk;
@@ -655,7 +656,7 @@ static void cmd_upload(void)
         return;
     }
 
-   n = str_append(line, 0, sizeof(line), "DATA");
+    n = str_append(line, 0, sizeof(line), "DATA");
     n += hex_format(line + n, upload_src.sectors * SECTOR_SIZE, 8);
     usb_bulk_send(line, n);
 
@@ -1033,7 +1034,7 @@ static void cmd_flash(const char *name)
 
     rc = resolve_part(name, &dev, &start, &sectors, &encrypted);
     if (rc != 0) {
-       n = str_append(line, 0, sizeof(line), "cannot resolve ");
+        n = str_append(line, 0, sizeof(line), "cannot resolve ");
         n = str_append(line, n, sizeof(line), name);
         line[n] = 0;
         fb_fail(line);
@@ -1069,7 +1070,7 @@ static void cmd_flash(const char *name)
          * sectors. */
         nsec = (download_len + SECTOR_SIZE - 1) / SECTOR_SIZE;
         if (nsec > sectors) {
-           n = str_append(line, 0, sizeof(line), "image is ");
+            n = str_append(line, 0, sizeof(line), "image is ");
             n += dec_format(line + n, nsec);
             n = str_append(line, n, sizeof(line), " sectors, partition holds ");
             n += dec_format(line + n, sectors);
@@ -1095,7 +1096,7 @@ static void cmd_flash(const char *name)
         return;
     }
 
-   n = str_append(line, 0, sizeof(line), "wrote ");
+    n = str_append(line, 0, sizeof(line), "wrote ");
     n += dec_format(line + n, flash_written);
     n = str_append(line, n, sizeof(line), " sectors to ");
     n = str_append(line, n, sizeof(line), name);
@@ -1134,7 +1135,7 @@ static void cmd_partition(void)
          * the part that actually says why. mmc_init_step: 1 CMD0, 2 CMD1,
          * 3 CMD2, 4 CMD3, 5 CMD7, 6 BUS_WIDTH, 7 HS_TIMING.
          */
-       n = str_append(line, 0, sizeof(line), "mmc init rc ");
+        n = str_append(line, 0, sizeof(line), "mmc init rc ");
         n += hex_format(line + n, (u32)init_rc, 2);
         n = str_append(line, n, sizeof(line), " step ");
         n += dec_format(line + n, mmc_init_step);
@@ -1156,7 +1157,7 @@ static void cmd_partition(void)
 
     if (rc != MMC_OK || pt_buf[0] != '8' || pt_buf[1] != '2' ||
         pt_buf[2] != '4' || pt_buf[3] != '6') {
-       n = str_append(line, 0, sizeof(line), "rc ");
+        n = str_append(line, 0, sizeof(line), "rc ");
         n += hex_format(line + n, (u32)rc, 2);
         n = str_append(line, n, sizeof(line), " err ");
         n += hex_format(line + n, mmc_last_error, 4);
@@ -1269,7 +1270,7 @@ static void cmd_exec(const char *args)
 
     /* Announce BEFORE jumping, so a callee that never returns looks different
      * from a command that was rejected. */
-   n = str_append(line, 0, sizeof(line), "calling ");
+    n = str_append(line, 0, sizeof(line), "calling ");
     n += hex_format(line + n, addr, 16);
     line[n] = 0;
     fb_info(line);
@@ -1278,7 +1279,7 @@ static void cmd_exec(const char *args)
 
     ret = ((u64 (*)(void))(unsigned long)addr)();
 
-   n = str_append(line, 0, sizeof(line), "returned ");
+    n = str_append(line, 0, sizeof(line), "returned ");
     n += hex_format(line + n, ret, 16);
     line[n] = 0;
     fb_result(line);
@@ -1839,7 +1840,7 @@ static void cmd_cetus_exec(const char *args)
         return;
     }
 
-   n = str_append(line, 0, sizeof(line), "entering ");
+    n = str_append(line, 0, sizeof(line), "entering ");
     n += hex_format(line + n, addr, 8);
     line[n] = 0;
     fb_info(line);
@@ -1992,7 +1993,7 @@ static void cmd_getvar_partition_size(const char *name)
         return;
     }
 
-   n = str_append(line, 0, sizeof(line), "0x");
+    n = str_append(line, 0, sizeof(line), "0x");
     n += hex_format_min(line + n, (u64)sectors * SECTOR_SIZE);
     line[n] = 0;
     fb_okay(line);
@@ -2013,12 +2014,12 @@ static void cmd_getvar(const char *name)
     } else if (str_eq(name, "serialno")) {
         fb_okay("ILCE7M4-fastboot");
     } else if (str_eq(name, "max-download-size")) {
-       n = str_append(line, 0, sizeof(line), "0x");
+        n = str_append(line, 0, sizeof(line), "0x");
         n += hex_format(line + n, DOWNLOAD_MAX, 8);
         line[n] = 0;
         fb_okay(line);
     } else if (str_eq(name, "downloadsize")) {
-       n = str_append(line, 0, sizeof(line), "0x");
+        n = str_append(line, 0, sizeof(line), "0x");
         n += hex_format(line + n, DOWNLOAD_MAX, 8);
         line[n] = 0;
         fb_okay(line);
@@ -2044,7 +2045,7 @@ static void cmd_download(const char *args)
     }
 
     /* DATA<8 hex> tells the host to start sending. */
-   n = str_append(line, 0, sizeof(line), "DATA");
+    n = str_append(line, 0, sizeof(line), "DATA");
     n += hex_format(line + n, want, 8);
     usb_bulk_send(line, n);
 
