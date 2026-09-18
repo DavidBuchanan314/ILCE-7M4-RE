@@ -26,6 +26,7 @@
  */
 
 #define FB_RESPONSE_MAX     64
+#define FB_TAG_LEN          4       /* OKAY / FAIL / INFO / DATA */
 #define FB_COMMAND_MAX      64
 
 #define DMA_SECTION __attribute__((section(".usbdma"), aligned(64)))
@@ -67,6 +68,14 @@ static const char *str_after(const char *s, const char *prefix)
         s++; prefix++;
     }
     return s;
+}
+
+/* Append src at dst[n], bounded by the whole buffer. Returns the new length. */
+static u32 str_append(char *dst, u32 n, u32 size, const char *src)
+{
+    while (*src && n + 1 < size)
+        dst[n++] = *src++;
+    return n;
 }
 
 static u32 str_copy(char *dst, const char *src, u32 max)
@@ -135,9 +144,9 @@ static u64 hex_parse(const char *s, const char **end)
 
 static void fb_reply(const char *tag, const char *msg)
 {
-    u32 n = str_copy((char *)resp_buf, tag, 4);
+    u32 n = str_copy((char *)resp_buf, tag, FB_TAG_LEN);
     if (msg)
-        n += str_copy((char *)resp_buf + 4, msg, FB_RESPONSE_MAX - 4);
+        n = str_append((char *)resp_buf, n, sizeof(resp_buf), msg);
     usb_bulk_send(resp_buf, n);
 }
 
@@ -229,11 +238,11 @@ static void cmd_poke(const char *args)
 
     /* Read back: on MMIO this is often not the value written, and that
      * difference is usually the interesting part. */
-    n += str_copy(line + n, "wrote ", FB_RESPONSE_MAX);
+    n = str_append(line, n, sizeof(line), "wrote ");
     n += hex_format(line + n, value, 8);
-    n += str_copy(line + n, " -> ", 8);
+    n = str_append(line, n, sizeof(line), " -> ");
     n += hex_format(line + n, addr, 8);
-    n += str_copy(line + n, " readback ", 16);
+    n = str_append(line, n, sizeof(line), " readback ");
     n += hex_format(line + n, read32(addr), 8);
     line[n] = 0;
     fb_result(line);
@@ -289,14 +298,14 @@ static void pt_line(const char *name, u32 start, u32 count, const char *type)
     char line[FB_RESPONSE_MAX];
     u32 n = 0;
 
-    n += str_copy(line + n, name, 16);
+    n = str_append(line, n, sizeof(line), name);
     while (n < 11)
         line[n++] = ' ';
     n += hex_format(line + n, start, 8);
     line[n++] = ' ';
     n += hex_format(line + n, count, 8);
     line[n++] = ' ';
-    n += str_copy(line + n, type, 8);
+    n = str_append(line, n, sizeof(line), type);
     line[n] = 0;
     fb_info(line);
 }
@@ -312,16 +321,16 @@ static void pt_header(void)
     char line[FB_RESPONSE_MAX];
     u32 n = 0;
 
-    n += str_copy(line + n, "device", 16);
+    n = str_append(line, n, sizeof(line), "device");
     while (n < 11)
         line[n++] = ' ';
-    n += str_copy(line + n, "start", 8);
+    n = str_append(line, n, sizeof(line), "start");
     while (n < 20)
         line[n++] = ' ';
-    n += str_copy(line + n, "count", 8);
+    n = str_append(line, n, sizeof(line), "count");
     while (n < 29)
         line[n++] = ' ';
-    n += str_copy(line + n, "type", 8);
+    n = str_append(line, n, sizeof(line), "type");
     line[n] = 0;
     fb_info(line);
 }
@@ -507,8 +516,8 @@ static void cmd_partition_dump(const char *args)
 
     rc = resolve_part(name, &dev, &start, &sectors, &encrypted);
     if (rc != 0) {
-        n = str_copy(line, "cannot resolve ", FB_RESPONSE_MAX);
-        n += str_copy(line + n, name, 24);
+       n = str_append(line, 0, sizeof(line), "cannot resolve ");
+        n = str_append(line, n, sizeof(line), name);
         line[n] = 0;
         fb_fail(line);
         return;
@@ -536,9 +545,9 @@ static void cmd_partition_dump(const char *args)
     upload_src.decrypt = encrypted;
 
     /* The arming is silent; the only thing worth saying is what to run next. */
-    n = str_copy(line, "hint: fastboot get_staged ", FB_RESPONSE_MAX);
-    n += str_copy(line + n, name, sizeof(name));
-    n += str_copy(line + n, ".bin", 8);
+   n = str_append(line, 0, sizeof(line), "hint: fastboot get_staged ");
+    n = str_append(line, n, sizeof(line), name);
+    n = str_append(line, n, sizeof(line), ".bin");
     line[n] = 0;
     fb_result(line);
 }
@@ -560,7 +569,7 @@ static void cmd_upload(void)
     }
 
     if (upload_src.kind == UPLOAD_MEM) {
-        n = str_copy(line, "DATA", 4);
+       n = str_append(line, 0, sizeof(line), "DATA");
         n += hex_format(line + n, upload_src.len, 8);
         usb_bulk_send(line, n);
 
@@ -594,7 +603,7 @@ static void cmd_upload(void)
     }
 
     if (upload_src.kind == UPLOAD_CETUS_NOR) {
-        n = str_copy(line, "DATA", 4);
+       n = str_append(line, 0, sizeof(line), "DATA");
         n += hex_format(line + n, upload_src.len, 8);
         usb_bulk_send(line, n);
 
@@ -618,7 +627,7 @@ static void cmd_upload(void)
     }
 
     if (upload_src.kind == UPLOAD_CETUS) {
-        n = str_copy(line, "DATA", 4);
+       n = str_append(line, 0, sizeof(line), "DATA");
         n += hex_format(line + n, upload_src.len, 8);
         usb_bulk_send(line, n);
 
@@ -646,7 +655,7 @@ static void cmd_upload(void)
         return;
     }
 
-    n = str_copy(line, "DATA", 4);
+   n = str_append(line, 0, sizeof(line), "DATA");
     n += hex_format(line + n, upload_src.sectors * SECTOR_SIZE, 8);
     usb_bulk_send(line, n);
 
@@ -720,12 +729,12 @@ static void flash_fail(const char *what, int rc)
     if (rc == MMC_ERR_CARD_STATUS && (mmc_last_r1 & MMC_R1_WP_VIOLATION))
         fb_info("card reports a write protect violation");
 
-    n += str_copy(line + n, what, 16);
-    n += str_copy(line + n, " failed rc ", 16);
+    n = str_append(line, n, sizeof(line), what);
+    n = str_append(line, n, sizeof(line), " failed rc ");
     n += hex_format(line + n, (u32)rc, 2);
-    n += str_copy(line + n, " err ", 8);
+    n = str_append(line, n, sizeof(line), " err ");
     n += hex_format(line + n, mmc_last_error, 4);
-    n += str_copy(line + n, " r1 ", 8);
+    n = str_append(line, n, sizeof(line), " r1 ");
     n += hex_format(line + n, mmc_last_r1, 8);
     line[n] = 0;
     fb_fail(line);
@@ -1024,8 +1033,8 @@ static void cmd_flash(const char *name)
 
     rc = resolve_part(name, &dev, &start, &sectors, &encrypted);
     if (rc != 0) {
-        n = str_copy(line, "cannot resolve ", FB_RESPONSE_MAX);
-        n += str_copy(line + n, name, 24);
+       n = str_append(line, 0, sizeof(line), "cannot resolve ");
+        n = str_append(line, n, sizeof(line), name);
         line[n] = 0;
         fb_fail(line);
         return;
@@ -1060,9 +1069,9 @@ static void cmd_flash(const char *name)
          * sectors. */
         nsec = (download_len + SECTOR_SIZE - 1) / SECTOR_SIZE;
         if (nsec > sectors) {
-            n = str_copy(line, "image is ", FB_RESPONSE_MAX);
+           n = str_append(line, 0, sizeof(line), "image is ");
             n += dec_format(line + n, nsec);
-            n += str_copy(line + n, " sectors, partition holds ", 32);
+            n = str_append(line, n, sizeof(line), " sectors, partition holds ");
             n += dec_format(line + n, sectors);
             line[n] = 0;
             fb_fail(line);
@@ -1086,10 +1095,10 @@ static void cmd_flash(const char *name)
         return;
     }
 
-    n = str_copy(line, "wrote ", FB_RESPONSE_MAX);
+   n = str_append(line, 0, sizeof(line), "wrote ");
     n += dec_format(line + n, flash_written);
-    n += str_copy(line + n, " sectors to ", 16);
-    n += str_copy(line + n, name, 24);
+    n = str_append(line, n, sizeof(line), " sectors to ");
+    n = str_append(line, n, sizeof(line), name);
     line[n] = 0;
     fb_result(line);
 }
@@ -1125,13 +1134,13 @@ static void cmd_partition(void)
          * the part that actually says why. mmc_init_step: 1 CMD0, 2 CMD1,
          * 3 CMD2, 4 CMD3, 5 CMD7, 6 BUS_WIDTH, 7 HS_TIMING.
          */
-        n = str_copy(line, "mmc init rc ", FB_RESPONSE_MAX);
+       n = str_append(line, 0, sizeof(line), "mmc init rc ");
         n += hex_format(line + n, (u32)init_rc, 2);
-        n += str_copy(line + n, " step ", 8);
+        n = str_append(line, n, sizeof(line), " step ");
         n += dec_format(line + n, mmc_init_step);
-        n += str_copy(line + n, " err ", 8);
+        n = str_append(line, n, sizeof(line), " err ");
         n += hex_format(line + n, mmc_last_error, 4);
-        n += str_copy(line + n, " ocr ", 8);
+        n = str_append(line, n, sizeof(line), " ocr ");
         n += hex_format(line + n, mmc_ocr, 8);
         line[n] = 0;
         fb_fail(line);
@@ -1147,11 +1156,11 @@ static void cmd_partition(void)
 
     if (rc != MMC_OK || pt_buf[0] != '8' || pt_buf[1] != '2' ||
         pt_buf[2] != '4' || pt_buf[3] != '6') {
-        n = str_copy(line, "rc ", FB_RESPONSE_MAX);
+       n = str_append(line, 0, sizeof(line), "rc ");
         n += hex_format(line + n, (u32)rc, 2);
-        n += str_copy(line + n, " err ", 8);
+        n = str_append(line, n, sizeof(line), " err ");
         n += hex_format(line + n, mmc_last_error, 4);
-        n += str_copy(line + n, " magic ", 8);
+        n = str_append(line, n, sizeof(line), " magic ");
         n += hex_format(line + n, le32(pt_buf), 8);
         line[n] = 0;
         fb_fail(line);
@@ -1260,7 +1269,7 @@ static void cmd_exec(const char *args)
 
     /* Announce BEFORE jumping, so a callee that never returns looks different
      * from a command that was rejected. */
-    n = str_copy(line, "calling ", FB_RESPONSE_MAX);
+   n = str_append(line, 0, sizeof(line), "calling ");
     n += hex_format(line + n, addr, 16);
     line[n] = 0;
     fb_info(line);
@@ -1269,7 +1278,7 @@ static void cmd_exec(const char *args)
 
     ret = ((u64 (*)(void))(unsigned long)addr)();
 
-    n = str_copy(line, "returned ", FB_RESPONSE_MAX);
+   n = str_append(line, 0, sizeof(line), "returned ");
     n += hex_format(line + n, ret, 16);
     line[n] = 0;
     fb_result(line);
@@ -1314,7 +1323,7 @@ static void darwin_show_bytes(const char *what, const u8 *b, u32 n)
     char line[FB_RESPONSE_MAX];
     u32 i, k = 0;
 
-    k += str_copy(line + k, what, FB_RESPONSE_MAX - k);
+    k = str_append(line, k, sizeof(line), what);
     for (i = 0; i < n; i++) {
         line[k++] = ' ';
         k += hex_format(line + k, b[i], 2);
@@ -1423,12 +1432,12 @@ static void cetus_fail(const char *what, int rc)
         return;
     }
 
-    n += str_copy(line + n, what, FB_RESPONSE_MAX - n);
+    n = str_append(line, n, sizeof(line), what);
     if (CETUS_IS_STATUS(rc)) {
-        n += str_copy(line + n, ": target status ", 20);
+        n = str_append(line, n, sizeof(line), ": target status ");
         n += hex_format(line + n, CETUS_STATUS(rc), 2);
     } else {
-        n += str_copy(line + n, ": rc ", 8);
+        n = str_append(line, n, sizeof(line), ": rc ");
         n += dec_format(line + n, (u32)(-rc));
     }
     line[n] = 0;
@@ -1440,9 +1449,9 @@ static void cetus_report_link(void)
     char line[FB_RESPONSE_MAX];
     u32 n = 0;
 
-    n += str_copy(line + n, "reset ", FB_RESPONSE_MAX);
+    n = str_append(line, n, sizeof(line), "reset ");
     n += hex_format(line + n, cetus_reset_state(), 8);
-    n += str_copy(line + n, "  bootmode ", 16);
+    n = str_append(line, n, sizeof(line), "  bootmode ");
     n += hex_format(line + n, cetus_bootmode_state(), 8);
     line[n] = 0;
     fb_info(line);
@@ -1465,7 +1474,7 @@ static void cetus_report_payload(void)
     /* In the order the bytes arrive -- manufacturer, type, density -- which
      * is how a datasheet lists them. Printing the assembled word instead
      * reverses them and reads like a different part entirely. */
-    n += str_copy(line + n, "payload running, flash ", FB_RESPONSE_MAX);
+    n = str_append(line, n, sizeof(line), "payload running, flash ");
     for (i = 0; i < 3; i++) {
         n += hex_format(line + n, (id >> (8 * i)) & 0xFF, 2);
         line[n++] = ' ';
@@ -1612,9 +1621,9 @@ static void cmd_cetus_poke(const char *args)
         return;
     }
 
-    n += str_copy(line + n, "wrote ", FB_RESPONSE_MAX);
+    n = str_append(line, n, sizeof(line), "wrote ");
     n += hex_format(line + n, value, (int)(width * 2));
-    n += str_copy(line + n, " -> ", 8);
+    n = str_append(line, n, sizeof(line), " -> ");
     n += hex_format(line + n, addr, 8);
 
     if (cetus_read(addr, back, width, width) == 0) {
@@ -1622,7 +1631,7 @@ static void cmd_cetus_poke(const char *args)
 
         for (i = 0; i < width; i++)
             v |= (u32)back[i] << (8 * i);
-        n += str_copy(line + n, " readback ", 16);
+        n = str_append(line, n, sizeof(line), " readback ");
         n += hex_format(line + n, v, (int)(width * 2));
     }
     line[n] = 0;
@@ -1661,9 +1670,9 @@ static void cmd_cetus_load(const char *args)
         return;
     }
 
-    n += str_copy(line + n, "loaded ", FB_RESPONSE_MAX);
+    n = str_append(line, n, sizeof(line), "loaded ");
     n += hex_format_min(line + n, len);
-    n += str_copy(line + n, " bytes -> ", 16);
+    n = str_append(line, n, sizeof(line), " bytes -> ");
     n += hex_format(line + n, addr, 8);
     line[n] = 0;
     fb_result(line);
@@ -1714,9 +1723,9 @@ static void cmd_cetus_rate(const char *args)
         return;
     }
 
-    n += str_copy(line + n, "sck ", FB_RESPONSE_MAX);
+    n = str_append(line, n, sizeof(line), "sck ");
     n += dec_format(line + n, cetus_rate_khz());
-    n += str_copy(line + n, " kHz", 8);
+    n = str_append(line, n, sizeof(line), " kHz");
     line[n] = 0;
     fb_result(line);
 }
@@ -1805,9 +1814,9 @@ static void cmd_cetus_dumpnor(const char *args)
     upload_src.addr = off;
     upload_src.len  = len;
 
-    n += str_copy(line + n, "staged ", FB_RESPONSE_MAX);
+    n = str_append(line, n, sizeof(line), "staged ");
     n += hex_format_min(line + n, len);
-    n += str_copy(line + n, " bytes; fastboot get_staged nor.bin", 40);
+    n = str_append(line, n, sizeof(line), " bytes; get_staged cetus_nor.bin");
     line[n] = 0;
     fb_result(line);
 }
@@ -1830,7 +1839,7 @@ static void cmd_cetus_exec(const char *args)
         return;
     }
 
-    n = str_copy(line, "entering ", FB_RESPONSE_MAX);
+   n = str_append(line, 0, sizeof(line), "entering ");
     n += hex_format(line + n, addr, 8);
     line[n] = 0;
     fb_info(line);
@@ -1983,7 +1992,7 @@ static void cmd_getvar_partition_size(const char *name)
         return;
     }
 
-    n = str_copy(line, "0x", FB_RESPONSE_MAX);
+   n = str_append(line, 0, sizeof(line), "0x");
     n += hex_format_min(line + n, (u64)sectors * SECTOR_SIZE);
     line[n] = 0;
     fb_okay(line);
@@ -2004,12 +2013,12 @@ static void cmd_getvar(const char *name)
     } else if (str_eq(name, "serialno")) {
         fb_okay("ILCE7M4-fastboot");
     } else if (str_eq(name, "max-download-size")) {
-        n = str_copy(line, "0x", FB_RESPONSE_MAX);
+       n = str_append(line, 0, sizeof(line), "0x");
         n += hex_format(line + n, DOWNLOAD_MAX, 8);
         line[n] = 0;
         fb_okay(line);
     } else if (str_eq(name, "downloadsize")) {
-        n = str_copy(line, "0x", FB_RESPONSE_MAX);
+       n = str_append(line, 0, sizeof(line), "0x");
         n += hex_format(line + n, DOWNLOAD_MAX, 8);
         line[n] = 0;
         fb_okay(line);
@@ -2035,7 +2044,7 @@ static void cmd_download(const char *args)
     }
 
     /* DATA<8 hex> tells the host to start sending. */
-    n = str_copy(line, "DATA", 4);
+   n = str_append(line, 0, sizeof(line), "DATA");
     n += hex_format(line + n, want, 8);
     usb_bulk_send(line, n);
 

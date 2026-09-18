@@ -166,10 +166,9 @@ class Device:
 
 
 def await_line(dev, want, timeout, log=None):
-    """
-    Echo the payload's log until `want` shows up, or give up.
-    """
-    got = bytearray()
+    """Echo the payload's log until `want` appears. True if it did."""
+    needle = want.encode()
+    buf = bytearray()
     deadline = time.time() + timeout
 
     while time.time() < deadline:
@@ -180,15 +179,21 @@ def await_line(dev, want, timeout, log=None):
         if evt != RpEvt.UART:
             continue
 
-        got += data
+        buf += data
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
         if log:
             log.write(data)
             log.flush()
 
-        if want.encode() in got:
-            return True
+        # Match whole lines only, so the newline ending one is already out by
+        # the time it counts. Scanned lines are then dropped; `want` holds no
+        # newline, so it cannot straddle them.
+        end = buf.rfind(b"\n")
+        if end >= 0:
+            if needle in buf[:end]:
+                return True
+            del buf[:end + 1]
 
     return False
 

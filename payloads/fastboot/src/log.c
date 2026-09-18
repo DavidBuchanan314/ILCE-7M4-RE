@@ -13,9 +13,9 @@ void log_init(void)
     log_ready = (cetus_payload_state() == 0);
 }
 
-static u32 append(char *dst, u32 n, const char *src)
+static u32 append(char *dst, u32 n, u32 size, const char *src)
 {
-    while (*src && n < LOG_MAX - 1)
+    while (*src && n + 1 < size)
         dst[n++] = *src++;
     return n;
 }
@@ -28,8 +28,8 @@ void mira_log(const char *msg)
     if (!log_ready)
         return;
 
-    n = append(line, 0, "[mira] ");
-    n = append(line, n, msg);
+    n = append(line, 0, sizeof(line), "[mira] ");
+    n = append(line, n, sizeof(line), msg);
     line[n] = 0;
     cetus_println(line);
 }
@@ -43,10 +43,10 @@ void mira_logx(const char *msg, u64 value)
     if (!log_ready)
         return;
 
-    n = append(line, 0, "[mira] ");
-    n = append(line, n, msg);
-    n = append(line, n, " 0x");
-    for (i = 7; i >= 0 && n < LOG_MAX - 1; i--)
+    n = append(line, 0, sizeof(line), "[mira] ");
+    n = append(line, n, sizeof(line), msg);
+    n = append(line, n, sizeof(line), " 0x");
+    for (i = 7; i >= 0 && n + 1 < sizeof(line); i--)
         line[n++] = hexdigits[(value >> (i * 4)) & 0xF];
     line[n] = 0;
     cetus_println(line);
