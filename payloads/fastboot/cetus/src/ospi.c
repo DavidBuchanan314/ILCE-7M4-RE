@@ -117,9 +117,12 @@ static void controller_disable(void)
 #define OSPI_INDRDWATER     (OSPI_BASE + 0x64)
 
 #define CFG_ROM_VALUE       0x00088041u
-#define DEVRD_ROM_VALUE     0x00000003u
+/* 0x13 is READ with a 4-byte address; 0x03 reaches only the low 16 MiB
+ * and wraps silently above it. */
+#define DEVRD_ROM_VALUE     0x00000013u
 #define DEVWR_ROM_VALUE     0x00000002u
-#define DEVSZ_ROM_VALUE     0x00101002u
+/* Low nibble is address bytes - 1. */
+#define DEVSZ_ROM_VALUE     0x00101003u
 #define SRAMPART_ROM_VALUE  0x00000080u
 #define DMAPER_ROM_VALUE    0x00000602u
 #define MODEBIT_ROM_VALUE   0x00000200u
