@@ -4,6 +4,10 @@ See scripts/push_payload.py for usage
 
 See MULTI_* defines for pinout (they go to the Sony multi-port connector).
 
+Build flags, passed by the Makefile's DEFINES: OPEN_DRAIN drives the multi-port
+tx line against the camera's pull-up instead of pushing it to 3v3, and UART_TX
+lets the payload console transmit (which needs a level shifter).
+
 */
 
 #include <string.h>
@@ -24,6 +28,11 @@ See MULTI_* defines for pinout (they go to the Sony multi-port connector).
 
 #define RESET_PULSE_US 10u
 #define STARVE_MS      1200u
+
+#ifndef UART_TX
+// Serial1 falls back to its variant default when its tx pin is left unset, which must not be the multi-port line.
+static_assert(MULTI_TX != PIN_SERIAL1_TX, "MULTI_TX collides with the default Serial1 tx pin");
+#endif
 
 #define VERSION "uart_boot 1"
 
@@ -95,7 +104,11 @@ static void pulse_reset(void) {
 }
 
 static void carrier_start(void) {
-  pio_sm_config c = serialboot_program_get_default_config(pio_off);
+#ifdef OPEN_DRAIN
+  pio_sm_config c = serialboot_od_program_get_default_config(pio_off);
+#else
+  pio_sm_config c = serialboot_pp_program_get_default_config(pio_off);
+#endif
   sm_config_set_set_pins(&c, MULTI_TX, 1);
   sm_config_set_out_pins(&c, MULTI_TX, 1);
   sm_config_set_out_shift(&c, true, true, 32);
@@ -103,7 +116,12 @@ static void carrier_start(void) {
   sm_config_set_mov_status(&c, STATUS_TX_LESSTHAN, 1);
 
   pio_gpio_init(pio, MULTI_TX);
+#ifdef OPEN_DRAIN
+  pio_sm_set_pins_with_mask(pio, pio_sm, 0, 1u << MULTI_TX);
+  pio_sm_set_consecutive_pindirs(pio, pio_sm, MULTI_TX, 1, false);
+#else
   pio_sm_set_consecutive_pindirs(pio, pio_sm, MULTI_TX, 1, true);
+#endif
   pio_sm_init(pio, pio_sm, pio_off, &c);
   pio_sm_clear_fifos(pio, pio_sm);
   pio_interrupt_clear(pio, 0);
@@ -153,6 +171,13 @@ static uint32_t build_bits(const uint8_t *rec, uint32_t len) {
     }
   }
 
+#ifdef OPEN_DRAIN
+  // the state machine drives pindirs, so the wire level is the complement of each bit
+  for (uint32_t w = 1; w <= nwords; w++) {
+    bitbuf[w] = ~bitbuf[w];
+  }
+#endif
+
   return 1u + nwords;
 }
 
@@ -167,7 +192,9 @@ static void blob_send(uint32_t nwords) {
 
 static void uart_start(uint32_t baud) {
   Serial1.setFIFOSize(1024);
+#ifdef UART_TX
   Serial1.setTX(MULTI_TX);
+#endif
   Serial1.setRX(MULTI_RX);
   Serial1.begin(baud);
 }
@@ -254,7 +281,11 @@ static void handle_pkt(uint8_t type, uint8_t *d, uint16_t len) {
       send_text(EVT_ERR, "uart not up");
       break;
     }
+#ifdef UART_TX
     Serial1.write(d, len);
+#else
+    send_text(EVT_ERR, "uart tx disabled");
+#endif
     break;
 
   default:
@@ -311,7 +342,11 @@ void setup(void) {
   pinMode(MULTI_RST, INPUT);
 
   pio_sm   = pio_claim_unused_sm(pio, true);
-  pio_off  = pio_add_program(pio, &serialboot_program);
+#ifdef OPEN_DRAIN
+  pio_off  = pio_add_program(pio, &serialboot_od_program);
+#else
+  pio_off  = pio_add_program(pio, &serialboot_pp_program);
+#endif
   dma_chan = dma_claim_unused_channel(true);
 
   Serial.begin(115200);

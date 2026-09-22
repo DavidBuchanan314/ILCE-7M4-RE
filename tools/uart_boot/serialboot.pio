@@ -1,4 +1,31 @@
-.program serialboot
+; Open-drain: the pin value stays low and the program toggles the direction.
+.program serialboot_od
+
+.wrap_target
+carrier:
+    set pindirs, 0  [9]
+    mov x, status
+    jmp !x, blob
+    set pindirs, 1  [11]
+.wrap
+
+blob:
+    set pindirs, 1
+    out x, 32
+    set y, 28       [21]
+    set pindirs, 0  [23]
+preamble:
+    set pindirs, 1  [23]
+    set pindirs, 0  [22]
+    jmp y--, preamble
+bits:
+    out pindirs, 1
+    jmp x--, bits
+    irq set 0
+    jmp carrier
+
+; Push-pull: the pin is a permanent output and the program toggles the value.
+.program serialboot_pp
 
 .wrap_target
 carrier:

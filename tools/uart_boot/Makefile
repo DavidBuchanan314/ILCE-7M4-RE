@@ -2,6 +2,7 @@ FQBN := rp2040:rp2040:waveshare_rp2040_zero
 PORT ?= /dev/ttyACM0
 SKETCH := .
 BUILD_DIR := build
+DEFINES ?= -DOPEN_DRAIN
 CORE_URL := https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
 
 ARDUINO_CLI  := arduino-cli
@@ -20,7 +21,8 @@ serialboot.pio.h: serialboot.pio
 	$(PIOASM) -o c-sdk $< $@
 
 build: serialboot.pio.h
-	$(ARDUINO_CLI) compile --fqbn $(FQBN) --build-path $(BUILD_DIR) $(SKETCH)
+	$(ARDUINO_CLI) compile --fqbn $(FQBN) --build-path $(BUILD_DIR) \
+		--build-property "compiler.cpp.extra_flags=$(DEFINES)" $(SKETCH)
 
 flash: build
 	$(ARDUINO_CLI) upload --fqbn $(FQBN) --port $(PORT) --input-dir $(BUILD_DIR) $(SKETCH)

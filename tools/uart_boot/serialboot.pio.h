@@ -14,15 +14,61 @@
 #define __pio_const const
 #endif
 
-// ---------- //
-// serialboot //
-// ---------- //
+// ------------- //
+// serialboot_od //
+// ------------- //
 
-#define serialboot_wrap_target 0
-#define serialboot_wrap 3
-#define serialboot_pio_version 0
+#define serialboot_od_wrap_target 0
+#define serialboot_od_wrap 3
+#define serialboot_od_pio_version 0
 
-static __pio_const uint16_t serialboot_program_instructions[] = {
+static __pio_const uint16_t serialboot_od_program_instructions[] = {
+            //     .wrap_target
+    0xe980, //  0: set    pindirs, 0             [9]
+    0xa025, //  1: mov    x, status
+    0x0024, //  2: jmp    !x, 4
+    0xeb81, //  3: set    pindirs, 1             [11]
+            //     .wrap
+    0xe081, //  4: set    pindirs, 1
+    0x6020, //  5: out    x, 32
+    0xf55c, //  6: set    y, 28                  [21]
+    0xf780, //  7: set    pindirs, 0             [23]
+    0xf781, //  8: set    pindirs, 1             [23]
+    0xf680, //  9: set    pindirs, 0             [22]
+    0x0088, // 10: jmp    y--, 8
+    0x6081, // 11: out    pindirs, 1
+    0x004b, // 12: jmp    x--, 11
+    0xc000, // 13: irq    nowait 0
+    0x0000, // 14: jmp    0
+};
+
+#if !PICO_NO_HARDWARE
+static __pio_const struct pio_program serialboot_od_program = {
+    .instructions = serialboot_od_program_instructions,
+    .length = 15,
+    .origin = -1,
+    .pio_version = serialboot_od_pio_version,
+#if PICO_PIO_VERSION > 0
+    .used_gpio_ranges = 0x0
+#endif
+};
+
+static inline pio_sm_config serialboot_od_program_get_default_config(uint offset) {
+    pio_sm_config c = pio_get_default_sm_config();
+    sm_config_set_wrap(&c, offset + serialboot_od_wrap_target, offset + serialboot_od_wrap);
+    return c;
+}
+#endif
+
+// ------------- //
+// serialboot_pp //
+// ------------- //
+
+#define serialboot_pp_wrap_target 0
+#define serialboot_pp_wrap 3
+#define serialboot_pp_pio_version 0
+
+static __pio_const uint16_t serialboot_pp_program_instructions[] = {
             //     .wrap_target
     0xe901, //  0: set    pins, 1                [9]
     0xa025, //  1: mov    x, status
@@ -43,19 +89,19 @@ static __pio_const uint16_t serialboot_program_instructions[] = {
 };
 
 #if !PICO_NO_HARDWARE
-static __pio_const struct pio_program serialboot_program = {
-    .instructions = serialboot_program_instructions,
+static __pio_const struct pio_program serialboot_pp_program = {
+    .instructions = serialboot_pp_program_instructions,
     .length = 15,
     .origin = -1,
-    .pio_version = serialboot_pio_version,
+    .pio_version = serialboot_pp_pio_version,
 #if PICO_PIO_VERSION > 0
     .used_gpio_ranges = 0x0
 #endif
 };
 
-static inline pio_sm_config serialboot_program_get_default_config(uint offset) {
+static inline pio_sm_config serialboot_pp_program_get_default_config(uint offset) {
     pio_sm_config c = pio_get_default_sm_config();
-    sm_config_set_wrap(&c, offset + serialboot_wrap_target, offset + serialboot_wrap);
+    sm_config_set_wrap(&c, offset + serialboot_pp_wrap_target, offset + serialboot_pp_wrap);
     return c;
 }
 #endif
