@@ -24,17 +24,17 @@
 
 static __pio_const uint16_t serialboot_program_instructions[] = {
             //     .wrap_target
-    0xee01, //  0: set    pins, 1                [14]
+    0xe901, //  0: set    pins, 1                [9]
     0xa025, //  1: mov    x, status
     0x0024, //  2: jmp    !x, 4
-    0xf200, //  3: set    pins, 0                [18]
+    0xeb00, //  3: set    pins, 0                [11]
             //     .wrap
-    0x6020, //  4: out    x, 32
-    0xe05c, //  5: set    y, 28
-    0xf800, //  6: set    pins, 0                [24]
-    0xf801, //  7: set    pins, 1                [24]
-    0xf800, //  8: set    pins, 0                [24]
-    0xf701, //  9: set    pins, 1                [23]
+    0xe000, //  4: set    pins, 0
+    0x6020, //  5: out    x, 32
+    0xf55c, //  6: set    y, 28                  [21]
+    0xf701, //  7: set    pins, 1                [23]
+    0xf700, //  8: set    pins, 0                [23]
+    0xf601, //  9: set    pins, 1                [22]
     0x0088, // 10: jmp    y--, 8
     0x6001, // 11: out    pins, 1
     0x004b, // 12: jmp    x--, 11

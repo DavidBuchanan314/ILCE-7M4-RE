@@ -20,7 +20,7 @@ See MULTI_* defines for pinout (they go to the Sony multi-port connector).
 #define MULTI_RX  29
 #define MULTI_RST 27
 
-#define PIO_CYCLE_US 10.5f
+#define LINK_BAUD 48000u
 
 #define RESET_PULSE_US 10u
 #define STARVE_MS      1200u
@@ -99,7 +99,7 @@ static void carrier_start(void) {
   sm_config_set_set_pins(&c, MULTI_TX, 1);
   sm_config_set_out_pins(&c, MULTI_TX, 1);
   sm_config_set_out_shift(&c, true, true, 32);
-  sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) * (PIO_CYCLE_US / 1000000.0f));
+  sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) / (2.0f * LINK_BAUD));
   sm_config_set_mov_status(&c, STATUS_TX_LESSTHAN, 1);
 
   pio_gpio_init(pio, MULTI_TX);

@@ -2,20 +2,20 @@
 
 .wrap_target
 carrier:
-    set pins, 1     [14]
+    set pins, 1     [9]
     mov x, status
     jmp !x, blob
-    set pins, 0     [18]
+    set pins, 0     [11]
 .wrap
 
 blob:
+    set pins, 0
     out x, 32
-    set y, 28
-    set pins, 0     [24]
-    set pins, 1     [24]
-preamble:
-    set pins, 0     [24]
+    set y, 28       [21]
     set pins, 1     [23]
+preamble:
+    set pins, 0     [23]
+    set pins, 1     [22]
     jmp y--, preamble
 bits:
     out pins, 1
