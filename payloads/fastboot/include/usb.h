@@ -58,23 +58,16 @@ struct usb_ctrlrequest {
 /*
  * Configure ep0 and arm a SETUP. Must be called BEFORE the D+ pullup goes up,
  * or the host's first SETUP after bus reset arrives at an endpoint that is not
- * listening. (A reset event would re-arm it, so this is belt-and-braces --
- * but the first enumeration attempt is the one most likely to be watched.)
+ * listening.
  */
 int usb_gadget_init(void);   /* 0 on success, else DEPCMD status */
 
-/*
- * Run the enumeration/event loop. Never returns: once the device is configured
- * it keeps servicing control traffic and hands bulk data to the fastboot layer.
- */
+/* Waits for SET_CONFIGURATION, then hands over to fastboot_loop(). */
 void usb_gadget_run(void);
 
 /*
- * Process at most one pending event. Every blocking operation below calls this
- * in its wait loop, so control traffic keeps being serviced while a bulk
- * transfer is outstanding -- the host can issue GET_STATUS or re-read a
- * descriptor at any time, and a device that stops answering ep0 mid-transfer
- * gets dropped.
+ * Drain pending events. Called from every wait loop below, so ep0 keeps being
+ * serviced while a bulk transfer is outstanding.
  */
 void usb_event_pump(void);
 
@@ -85,11 +78,7 @@ u32 usb_bulk_send(const void *buf, u32 len);
 /* True once the host has issued SET_CONFIGURATION. */
 int usb_is_configured(void);
 
-/*
- * Non-zero if the bulk path failed to come up or wedged. A stuck bulk endpoint
- * looks exactly like a hang from the host side, so this is reported over the
- * LED -- the one channel that still works when USB does not.
- */
+/* Non-zero if the bulk path failed to come up or wedged. */
 #define USB_BULK_ERR_STARTCFG       9
 #define USB_BULK_ERR_CFG_OUT        10
 #define USB_BULK_ERR_CFG_IN         11
@@ -107,52 +96,6 @@ void usb_bulk_abort(void);
  * if it recovered, negative if the error is not one it can. */
 int usb_bulk_recover(void);
 
-/*
- * Coarse progress marker, blinked continuously by the LED heartbeat so it is
- * readable even when USB itself is wedged.
- */
-/*
- * ep0 tracing. Small numbers so they are easy to count; these override the
- * coarse states below while a control transfer is in progress. The steady
- * state on an idle, healthy device is EP0_ARMED -- a SETUP is outstanding and
- * we are waiting for the host.
- */
-#define EP0_TRACE_ARMED             1   /* SETUP TRB queued, awaiting host    */
-#define EP0_TRACE_GOT_SETUP         2   /* SETUP received and handled         */
-#define EP0_TRACE_DATA_QUEUED       3   /* data stage queued                  */
-#define EP0_TRACE_STATUS_QUEUED     4   /* status stage queued                */
-#define EP0_TRACE_ARM_FAILED        5   /* STARTTRANSFER for SETUP failed     */
-
-#define USB_STATE_UNCONFIGURED      1
-#define USB_STATE_ENABLING_BULK     2
-#define USB_STATE_CONFIGURED        3
-#define USB_STATE_AWAIT_CMD         4
-#define USB_STATE_GOT_CMD           5
-#define USB_STATE_SENT_REPLY        6
-/*
- * "ISSUING" states are set before a command that can hang, so a wedge shows up
- * as a steady count rather than as silence. "FAILED" states are outcomes.
- */
-#define USB_STATE_CFG_OUT_ISSUING   7
-#define USB_STATE_CFG_IN_ISSUING    8
-#define USB_STATE_CFG_OUT_FAILED    12
-#define USB_STATE_CFG_IN_FAILED     13
-#define USB_STATE_WAIT_RECONFIG     11  /* reset seen; awaiting SET_CONFIGURATION */
-#define USB_STATE_IN_RESET          14  /* inside on_reset()                      */
-#define USB_STATE_RESET_EP0_FAIL    15  /* ep0_init() failed after a bus reset    */
-/*
- * Every remaining place the code can sit gets its own number. A state that
- * persists must correspond to a loop, so an untagged loop is an invisible one
- * -- which is exactly how USB_STATE_CONFIGURED ended up being reported from
- * somewhere it was never set.
- */
-#define USB_STATE_GADGET_WAIT       16  /* usb_gadget_run(), first configuration */
-#define USB_STATE_FB_LOOP_TOP       17  /* top of a fastboot_loop() iteration     */
-#define USB_STATE_IN_SET_CONFIG     18  /* inside the SET_CONFIGURATION handler   */
-#define USB_STATE_BULK_WAIT_OUT     19  /* OUT queued, waiting for completion     */
-#define USB_STATE_BULK_WAIT_IN      20  /* IN queued, waiting for completion      */
-
-extern volatile u32 usb_state;
 void usb_bulk_enable_pending(void);
 
 #endif /* FASTBOOT_USB_H */

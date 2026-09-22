@@ -3,10 +3,7 @@
 
 #include "io.h"
 
-/*
- * Opcodes. The first three keep the ROM's meaning so an unmodified client can
- * talk to either; the rest are ours, and are what the payload exists for.
- */
+/* The first three keep the ROM's meaning; the rest are ours. */
 #define OP_STATUS       0x11    /* liveness                                  */
 #define OP_UPLOAD       0x22    /* +1 width log2, +8 addr, +12 count         */
 #define OP_DOWNLOAD     0x21    /* +1 width log2, +8 addr, +12 count         */

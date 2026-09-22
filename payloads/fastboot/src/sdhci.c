@@ -15,10 +15,7 @@ int mmc_ready;
 #define CMD_TIMEOUT_TICKS   (TIMER0_HZ / 2)     /* 500 ms */
 #define BUSY_TIMEOUT_TICKS  (TIMER0_HZ)         /* 1 s    */
 
-/*
- * Reset the CMD and/or DAT line state machines. Self-clearing: the controller
- * drops the bit when the reset completes.
- */
+/* Self-clearing: the controller drops the bit when the reset completes. */
 static void sdhci_reset(u8 mask)
 {
     u32 start = timer_ticks();
@@ -50,9 +47,8 @@ static int wait_inhibit(u32 mask)
 }
 
 /*
- * Wait for one of `mask`'s bits in Normal Interrupt Status, and consume it.
- * An Error Interrupt aborts the wait: the specific cause is latched in
- * mmc_last_error so a failure can be reported rather than just timing out.
+ * Wait for one of `mask`'s bits and consume it. An Error Interrupt aborts the
+ * wait, with the cause latched in mmc_last_error.
  */
 static int wait_int(u16 mask, u32 timeout, int err)
 {
@@ -116,13 +112,9 @@ static int send_cmd(u8 index, u32 arg, u16 flags, u32 data_blocks)
 }
 
 /*
- * Set the SDCLK divider. `div` is the SDHCI divider N: the card clock is
- * base/(2*N), except N=0 which means base/1.
- *
- * The SD clock must be stopped while the divider changes, and Internal Clock
- * Stable has to be observed before re-enabling it -- driving the card from an
- * unstable clock is exactly the sort of thing that produces intermittent
- * command timeouts.
+ * `div` is the SDHCI divider N: the card clock is base/(2*N), except N=0 which
+ * means base/1. The SD clock must be stopped while it changes, and Internal
+ * Clock Stable observed before re-enabling it.
  */
 static void sdhci_set_clock(u32 div)
 {
@@ -230,13 +222,9 @@ int mmc_init(void)
         goto out;
 
     /*
-     * A freshly identified card is in 1-bit legacy mode, whatever the
-     * controller was left set to. The ROM leaves Host Control at 8-bit high
-     * speed, so reading now would clock 8 lines against a card driving one --
-     * which shows up as Data CRC / End Bit errors rather than as silence.
-     *
-     * CMD6 travels on the CMD line, so these switches work while still in
-     * 1-bit mode.
+     * A freshly identified card is in 1-bit legacy mode whatever the
+     * controller is set to. CMD6 travels on the CMD line, so it works
+     * from there.
      */
     mmc_init_step = 6;
     ret = mmc_switch(EXT_CSD_BUS_WIDTH, MMC_BUS_WIDTH_8);
@@ -249,14 +237,9 @@ int mmc_init(void)
         goto out;
 
     /*
-     * Enable Buffer Read Ready and Buffer Write Ready.
-     *
-     * Normal Interrupt STATUS ENABLE gates whether a bit ever appears in the
-     * status register -- it is not just an IRQ mask. The ROM leaves it at
-     * 0x400B (command/transfer complete, DMA, error), which is all its
-     * DMA-based reader needs, so bits 4 and 5 never set and a PIO transfer
-     * waits for a flag that can never arrive. That presents as a data timeout
-     * with no error bits at all.
+     * Status Enable gates whether a bit ever appears in the status register;
+     * it is not an IRQ mask. The ROM leaves Buffer Read/Write Ready off, which
+     * its DMA reader does not need and a PIO transfer waits forever for.
      */
     write16(SDHCI_INT_ENABLE,
             read16(SDHCI_INT_ENABLE) | SDHCI_INT_BUF_READ_RDY |
@@ -294,10 +277,8 @@ int mmc_raw_cmd(u8 index, u32 arg, u16 flags, u32 *resp)
 }
 
 /*
- * A failed command usually means the card is no longer where we think it is --
- * knocked out of transfer state by a stray CMD0, a power blip, or a reset. Mark
- * it not-ready so the next operation re-identifies instead of repeating the
- * same failure against stale state.
+ * A failed command usually means the card has left transfer state. Mark it
+ * not-ready so the next operation re-identifies.
  */
 static int mmc_fail(int ret)
 {
@@ -369,10 +350,7 @@ int mmc_read_blocks(u32 start_block, void *buf, u32 nblocks)
     flags = SDHCI_CMD_RESP_SHORT | SDHCI_CMD_CRC_CHECK |
             SDHCI_CMD_INDEX_CHECK | SDHCI_CMD_DATA_PRESENT;
 
-    /*
-     * The argument is a block address, not a byte offset: this part is well
-     * over 2 GB so it is certainly high-capacity addressing.
-     */
+    /* Block address, not byte offset: this part is high-capacity. */
     ret = send_cmd(multi ? MMC_CMD_READ_MULTIPLE_BLOCK
                          : MMC_CMD_READ_SINGLE_BLOCK,
                    start_block, flags, nblocks);
@@ -414,27 +392,18 @@ int mmc_wait_ready(void)
             MMC_R1_STATE(resp) == MMC_STATE_TRAN)
             return MMC_OK;
 
-        /*
-         * Programming a block is slow and erase-block-sized internally, so a
-         * write can sit in the prg state for a long time. The generous budget
-         * costs nothing when the card is quick.
-         */
+        /* Programming is erase-block-sized internally, so a write can sit in
+         * the prg state for a long time. */
         if (timer_ticks() - start > BUSY_TIMEOUT_TICKS * 5)
             return MMC_ERR_XFER;
     }
 }
 
 /*
- * Mirror of mmc_read_blocks(). Two differences matter beyond the direction bit:
- *
- *  - Transfer Complete only means the last block reached the card, not that it
- *    was programmed, so this ends by polling CMD13 via mmc_wait_ready(). That
- *    is also the only place a write-protect violation can be observed.
- *  - An abort mid-transfer leaves the card in the receive state with the
- *    controller's DAT line reset underneath it, so the card is stopped with
- *    CMD12 before giving up. The read path gets away without this because
- *    mmc_fail() forces a re-identification either way, but leaving a card
- *    holding DAT0 low makes even CMD0 unreliable.
+ * Two differences from mmc_read_blocks() beyond the direction bit: Transfer
+ * Complete only means the last block reached the card, so this ends by polling
+ * CMD13; and an abort leaves the card in the receive state holding DAT0 low,
+ * which makes even CMD0 unreliable, so it is stopped with CMD12 first.
  */
 int mmc_write_blocks(u32 start_block, const void *buf, u32 nblocks)
 {
@@ -478,10 +447,8 @@ int mmc_write_blocks(u32 start_block, const void *buf, u32 nblocks)
             write32(SDHCI_BUFFER, *in++);
     }
 
-    /*
-     * Busy timeout, not the command timeout: the card may hold DAT0 low
-     * through the final block's programming before Transfer Complete.
-     */
+    /* Busy timeout: the card may hold DAT0 low through the final block's
+     * programming before Transfer Complete. */
     ret = wait_int(SDHCI_INT_XFER_COMPLETE, BUSY_TIMEOUT_TICKS, MMC_ERR_XFER);
     if (ret)
         goto abort;
@@ -489,9 +456,8 @@ int mmc_write_blocks(u32 start_block, const void *buf, u32 nblocks)
     return mmc_fail(mmc_wait_ready());
 
 abort:
-    /* mmc_raw_cmd() rather than send_cmd(): CMD12 is R1b, and leaving the
-     * card's busy response unconsumed is how the next command inherits the
-     * failure. */
+    /* mmc_raw_cmd(), not send_cmd(): CMD12 is R1b and its busy response has
+     * to be consumed. */
     if (multi)
         mmc_raw_cmd(MMC_CMD_STOP_TRANSMISSION, 0,
                     SDHCI_CMD_RESP_BUSY | SDHCI_CMD_CRC_CHECK |

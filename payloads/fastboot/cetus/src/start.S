@@ -1,7 +1,6 @@
 /*
- * Entered by the mask ROM's Entry command: the monitor stores this address to
- * the hand-off vector at 0xFE00500C and returns, and the ROM's outer loop
- * branches here. We arrive at EL3 with the MMU off and no usable stack.
+ * Entered by the mask ROM's Entry command, which stores this address to the
+ * hand-off vector at 0xFE00500C. EL3, MMU off, no usable stack.
  */
 
     .arch armv8-a

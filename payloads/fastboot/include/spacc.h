@@ -4,25 +4,23 @@
 #include "io.h"
 
 /*
- * Elliptic/Synopsys SPAcc crypto engine, used here for the AES-XTS-256 that
- * the user-area partitions are encrypted with.
+ * Elliptic/Synopsys SPAcc, used for the AES-XTS-256 the user-area partitions
+ * are encrypted with. Register map and job sequence come from the vendor's
+ * GPL driver, which ships out of tree in elpspacc/ beside the kernel.
  *
- * Register map and job sequence come from the vendor's own GPL driver
- * (Sony-ILCE-7M4-Linux/elpspacc), so this is the same programming model the
- * stock kernel uses. The live core was read back before any of it was written:
+ * The core reports ID 0x00010850 -- major 5 -- and CONFIG 0x16710080: 128
+ * contexts, cipher page 1 << 7 = 128 B, DMA type 1 = DDT/scattergather
+ * (elpspacc/export/elpspacc.h:13, decoded in
+ * elpspacc/driver/src/core/elpspacc/spacc_init.c:51).
  *
- *   0x180 ID      00010850  major 5, minor 0, 1 project, AUX present
- *   0x184 CONFIG  16710080  128 contexts, 1 vSPAcc, ciph page 1<<7 = 128 B,
- *                           hash page 1<<6, DMA type 1 = DDT/scattergather
- *   0x190 CONFIG2 01000100
- *   0x00C FIFO_STAT 80000000  STAT_EMPTY: idle
- *   0x1C0 SECURE_CTRL 0       not locked to secure mode
- *
- * Major 5 matters: at 4.15 and above the CTRL register moved HASH_ALG from
- * bit 4 to bit 3. The vendor driver's CTRL_SET_*_GEN helpers resolve to the
- * _415 layout unconditionally, which is the authoritative answer for this SoC.
+ * CTRL uses the 4.15+ layout, where HASH_ALG is bit 3 rather than bit 4
+ * (elpspacc/export/elpspacchw.h:336 against :320). That is not inferred from
+ * the major number: the driver's CTRL_SET_*_GEN helpers take a spacc_device
+ * and ignore it, returning the _415 form unconditionally
+ * (elpspacc/driver/src/core/elpspacc/spacc_open.c:39).
  */
 
+/* Register offsets: elpspacc/export/elpspacchw.h:43 onwards. */
 #define SPACC_BASE              0xF7FC0000ull
 
 #define SPACC_REG_IRQ_EN        (SPACC_BASE + 0x000)
@@ -51,9 +49,10 @@
 #define SPACC_CTX_CIPH_KEY      (SPACC_BASE + 0x4000)
 
 /*
- * Layout within a cipher context page for XTS, from spacc_write_context():
- * key1 at 0, the tweak at 32, key2 at 48. KEY_SZ is programmed with HALF the
- * combined key length -- 32 for AES-256-XTS, not 64.
+ * Layout within a cipher context page for XTS, from spacc_write_context()
+ * (elpspacc/driver/src/core/elpspacc/spacc_set_context.c:72): key1 at 0, key2
+ * at 48, the tweak at 32. KEY_SZ is programmed with HALF the combined key
+ * length -- 32 for AES-256-XTS, not 64 -- as at :76.
  */
 #define SPACC_CTX_XTS_KEY1      0
 #define SPACC_CTX_XTS_IV        32
@@ -78,10 +77,7 @@ enum spacc_status {
 /* Last STATUS word and return code, for diagnostics. */
 extern u32 spacc_last_status;
 
-/*
- * Load the partition key into a context. Done once; the tweak is rewritten per
- * sector, the key is not.
- */
+/* Load the partition key into a context. The tweak is rewritten per sector. */
 void spacc_init(void);
 
 /*

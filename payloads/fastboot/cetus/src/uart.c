@@ -2,9 +2,8 @@
 #include "uart.h"
 
 /*
- * Register layout, divisors, pad masks and write order all come from the CP
- * loader's own uart_init, read out of eSRAM: the mask ROM decrypts that image
- * in as it boots and a reset into the monitor leaves it there.
+ * Register layout, divisors, pad masks and write order come from the CP
+ * loader's own uart_init.
  */
 
 static u64 uart_base = UART_BASE(0);
@@ -26,18 +25,15 @@ static u64 uart_base = UART_BASE(0);
 #define CR_VALUE        0xF01u      /* UARTEN | TXE | RXE | DTR | RTS */
 
 /*
- * UARTCLK is 12 MHz, which is the whole reason a first attempt at 48 read as
- * silence: BAUDDIV = 6 + 33/64 gives 12e6 / (16 * 6.5156) = 115200. The
- * loader's other mode is 1 + 40/64, i.e. 460800.
+ * UARTCLK is 12 MHz: BAUDDIV = 6 + 33/64 gives 12e6 / (16 * 6.5156) = 115200.
+ * The loader's other mode is 1 + 40/64, i.e. 460800.
  */
 #define BRD_INT_115200  6u
 #define BRD_FRAC_115200 0x21u
 
 /*
- * The pads sit on GPIO port 3, two adjacent bits per channel: both go to the
- * hardware function, and only the receive one needs its input buffer enabled.
- * Without this the UART shifts bytes out perfectly and none of them reach a
- * pin -- the same trap SPI0 has.
+ * GPIO port 3, two adjacent bits per channel. Both go to the hardware
+ * function; only the receive one needs its input buffer enabled.
  */
 #define UART_GPIO       (0xF101D000ull + 3ull * 0x1000)
 #define GPIO_INEN_SET   (UART_GPIO + 0x24)
@@ -58,8 +54,7 @@ void uart_init(u32 ch)
     write32(GPIO_FUNC_CLR, pad_mask[ch]);
     dsb();
 
-    /* Masked rather than the loader's 0x40: there is no vector table here, so
-     * an interrupt would be fatal and nothing services one anyway. */
+    /* Masked, unlike the loader's 0x40: there is no vector table here. */
     write32(UART_IMSC, 0);
     write32(UART_IBRD, BRD_INT_115200);
     write32(UART_FBRD, BRD_FRAC_115200);

@@ -2,15 +2,7 @@
 #include "io.h"
 #include "timer.h"
 
-/*
- * Timings are chosen to be countable by a person watching, not compact.
- * A blip is a full second: 0.3 s lit, 0.7 s dark. The marker is a long 1.5 s
- * flash followed by 1.5 s of dark, so the start of a count is unmistakable,
- * and cycles are separated by 3 s of dark.
- *
- * An earlier version used 50 ms units, which turned out to be far too fast to
- * count by eye -- the whole point of this channel is that a human can read it.
- */
+/* Slow enough to count by eye. */
 #define BLIP_ON_MS      300
 #define BLIP_OFF_MS     700
 #define MARKER_ON_MS    1500
@@ -21,9 +13,7 @@ typedef void (*rom_fn_t)(void);
 
 void led_init(void)
 {
-    /* The mask ROM already knows how to mux and enable these pins; borrowing
-     * its routine is cheaper and safer than rediscovering the pinmux. This is
-     * the same call the LED PoC makes. */
+    /* Cheaper than rediscovering the pinmux. Leaves the LED off. */
     ((rom_fn_t)ROM_LED_INIT)();
 }
 
@@ -43,20 +33,6 @@ static void pulse(u32 on_ms, u32 off_ms)
     mdelay(on_ms);
     led_off();
     mdelay(off_ms);
-}
-
-void led_selftest(void)
-{
-    int i;
-
-    /* Long, slow, and symmetric: 1 s on, 1 s off, three times. Anything other
-     * than three distinct flashes means led_off() is not working. */
-    for (i = 0; i < 3; i++) {
-        led_on();
-        mdelay(1000);
-        led_off();
-        mdelay(1000);
-    }
 }
 
 void led_blip(void)

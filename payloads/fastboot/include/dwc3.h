@@ -18,21 +18,16 @@ enum dwc3_status {
 int dwc3_core_init(void);
 
 /*
- * Assert the D+ pullup (DCTL.RUN_STOP) and wait for the controller to actually
- * leave the halted state. Writing RUN_STOP is not the same as the controller
- * running: dwc3_gadget_run_stop() upstream polls DSTS.DEVCTRLHLT afterwards,
- * and that distinction is exactly what tells "the write landed" apart from
- * "the device is on the bus".
+ * Assert the D+ pullup (DCTL.RUN_STOP) and wait for DSTS.DEVCTRLHLT to clear.
+ * The write landing is not the same as the device being on the bus.
  */
 int  dwc3_connect(void);
 void dwc3_disconnect(void);
 
-/* Whether the TCA block acknowledged during init. Not fatal, but worth
- * reporting separately: it is the most likely thing to be unnecessary (or
- * wrong) for the Multi connector. */
+/* Whether the TCA block acknowledged during init; not fatal. */
 int  dwc3_tca_acked(void);
 
-/* Latched during dwc3_core_init() so callers need not re-read MMIO. */
+/* Latched during dwc3_core_init(). */
 u32 dwc3_revision(void);
 
 /* Non-zero if this is a DWC_usb31 core (as the CXD90057 is), which changes
@@ -49,35 +44,20 @@ int dwc3_is_usb31(void);
  */
 int dwc3_depcmd(u32 phys_ep, u32 cmd, u32 p0, u32 p1, u32 p2);
 
-/*
- * Called repeatedly while dwc3_depcmd() waits. Implemented by the gadget layer
- * to keep the LED heartbeat advancing, so a command that never completes still
- * reports where it is stuck instead of freezing the only working debug channel.
- */
+/* Called repeatedly while dwc3_depcmd() waits. */
 void dwc3_wait_tick(void);
 
 /*
- * DEPSTARTCFG, issued on physical ep0 only and always with parameter 0.
- *
- * This resets the controller's transfer-resource assignment, so it belongs
- * exactly once per bus reset, as part of bringing ep0 up -- NOT at
- * SET_CONFIGURATION time. Issuing it again after enumeration tears the
- * resources out from under ep0 and the device goes deaf mid-session.
+ * DEPSTARTCFG on physical ep0, parameter 0. Resets the transfer-resource
+ * assignment of every endpoint, so it belongs once per bus reset and not at
+ * SET_CONFIGURATION time.
  */
 int dwc3_ep_start_config(void);
 
 /*
- * SETTRANSFRESOURCE for physical endpoints 0..count-1, issued as one batch
- * immediately after DEPSTARTCFG. Upstream does exactly this, looping over
- * every endpoint rather than assigning a resource per endpoint at config time.
- */
-int dwc3_set_xfer_resource_all(u32 count);
-
-/*
- * SETEPCONFIG for one endpoint, addressed by its PHYSICAL
- * number. There is no separate logical number to pass: dwc3 maps them 1:1 and
- * folds the direction bit in, so USB endpoint 0x81 is physical 3, and that is
- * also what goes in DEPCFG's EP_NUMBER field.
+ * SETEPCONFIG plus SETTRANSFRESOURCE for one endpoint, addressed by its
+ * PHYSICAL number -- dwc3 folds the direction bit in, so USB endpoint 0x81 is
+ * physical 3, and that is also what goes in DEPCFG's EP_NUMBER.
  */
 int dwc3_ep_config(u32 phys_ep, u32 type, u32 maxpacket);
 
@@ -89,18 +69,15 @@ void dwc3_ep_disable(u32 phys_ep);
  * *rsc_idx (needed later for ENDTRANSFER), or negative on failure. */
 int dwc3_ep_start_xfer(u32 phys_ep, u64 trb_addr, u32 *rsc_idx);
 
-/* ENDTRANSFER, using the resource index STARTTRANSFER handed back. Cancels a
- * queued transfer so it cannot complete later with stale data. */
+/* ENDTRANSFER, using the resource index STARTTRANSFER handed back. */
 int dwc3_ep_end_xfer(u32 phys_ep, u32 rsc_idx);
 
 int dwc3_ep_set_stall(u32 phys_ep);
 int dwc3_ep_clear_stall(u32 phys_ep);
 
-/* Pop one event, or return 0 if the buffer is empty. Events are 32-bit
- * words; 0 is not a valid event so it doubles as "nothing pending". */
+/* Pop one event; 0 is not a valid event, so it means the buffer is empty. */
 u32 dwc3_event_poll(void);
 
-/* Current device address register helper. */
 void dwc3_set_address(u32 addr);
 
 #endif /* FASTBOOT_DWC3_H */

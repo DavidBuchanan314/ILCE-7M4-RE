@@ -20,9 +20,6 @@
  *   FAIL<reason>          failure, ends the command
  *   INFO<message>         printed by the host, command continues
  *   DATA<8 hex digits>    device is ready for that many bytes
- *
- * The `oem peek` / `oem poke` commands are the point of this whole exercise:
- * they turn USB into a real debug channel, replacing the LED.
  */
 
 #define FB_RESPONSE_MAX     64
@@ -38,11 +35,8 @@ static u8 resp_buf[FB_RESPONSE_MAX] DMA_SECTION;
 
 #define DOWNLOAD_MAX  (512 * 1024)
 /*
- * One spare packet of slack. usb_bulk_recv() must round the requested length
- * up to a whole number of maximum-size packets, so the final chunk of a
- * download whose size is not a multiple of 512 can legitimately write past
- * `want` -- up to BULK_MAXPACKET-1 bytes past it. Without the slack that is a
- * buffer overflow for any unaligned download size.
+ * usb_bulk_recv() rounds up to a whole packet, so the last chunk can write up
+ * to BULK_MAXPACKET-1 bytes past the requested length.
  */
 static u8 download_buf[DOWNLOAD_MAX + BULK_MAXPACKET] DMA_SECTION;
 static u32 download_len;
@@ -99,8 +93,7 @@ static u32 hex_format(char *dst, u64 value, int digits)
     return (u32)digits;
 }
 
-/* Hex with no leading zeros, so a size reads as 0x400000 rather than
- * 0x0000000000400000. */
+/* Hex with no leading zeros. */
 static u32 hex_format_min(char *dst, u64 value)
 {
     int digits = 1, i;
@@ -154,12 +147,8 @@ static void fb_okay(const char *msg) { fb_reply("OKAY", msg ? msg : ""); }
 static void fb_fail(const char *msg) { fb_reply("FAIL", msg ? msg : ""); }
 static void fb_info(const char *msg) { fb_reply("INFO", msg ? msg : ""); }
 /*
- * Report a result the user needs to SEE.
- *
- * The fastboot client prints INFO lines (prefixed "(bootloader)") but does not
- * display the payload of an OKAY for `oem` commands -- so anything returned
- * only via fb_okay() is invisible, which silently hid both the exec return
- * value and poke's readback.
+ * The fastboot client prints INFO lines but not the payload of an OKAY for
+ * `oem` commands, so a result returned only via fb_okay() is invisible.
  */
 static void fb_result(const char *msg)
 {
@@ -169,12 +158,7 @@ static void fb_result(const char *msg)
 
 /* ---- oem peek / poke ---------------------------------------------------- */
 
-/*
- * `fastboot oem peek:<addr>[:<len>]`
- *
- * Emits one INFO line per 16 bytes, formatted like a conventional hex dump so
- * it can be read straight out of the fastboot output.
- */
+/* `fastboot oem peek:<addr>[:<len>]`, one INFO line per 16 bytes. */
 static void cmd_peek(const char *args)
 {
     const char *p;
@@ -192,8 +176,7 @@ static void cmd_peek(const char *args)
         return;
     }
 
-    /* Registers are 32-bit; an unaligned MMIO read would fault or return
-     * nonsense, so force alignment rather than silently misreporting. */
+    /* An unaligned MMIO read faults. */
     addr &= ~3ull;
     len = (len + 3) & ~3u;
 
@@ -236,8 +219,7 @@ static void cmd_poke(const char *args)
     write32(addr, value);
     dsb();
 
-    /* Read back: on MMIO this is often not the value written, and that
-     * difference is usually the interesting part. */
+    /* On MMIO the readback is often not the value written. */
     n = str_append(line, n, sizeof(line), "wrote ");
     n += hex_format(line + n, value, 8);
     n = str_append(line, n, sizeof(line), " -> ");
@@ -251,19 +233,14 @@ static void cmd_poke(const char *args)
 /* ---- oem partition ------------------------------------------------------ */
 
 #define SECTOR_SIZE         512
-/*
- * The SDM2 table starts at byte 32 with 16 bytes per entry. Four sectors holds
- * 126 entries, comfortably more than the ~23 this device uses, and costs one
- * read either way.
- */
+/* The SDM2 table starts at byte 32, 16 bytes per entry. */
 #define PT_SECTORS          4
 #define PT_MAX_ENTRIES      ((PT_SECTORS * SECTOR_SIZE - 32) / 16)
 
 /*
- * eMMC boot partition size. The hardware answer is EXT_CSD[226] BOOT_SIZE_MULT
- * x 128 KiB, but the ROM exposes no way to read EXT_CSD, so this is the
- * observed size of the nflashaB0 dump (4 MiB = 0x2000 sectors). Boot0 and
- * boot1 are always the same size as each other.
+ * The hardware answer is EXT_CSD[226] BOOT_SIZE_MULT x 128 KiB, which is not
+ * readable from here, so this is the observed 4 MiB. Boot0 and boot1 are
+ * always the same size as each other.
  */
 #define BOOT_PART_SECTORS   0x2000
 
@@ -310,12 +287,8 @@ static void pt_line(const char *name, u32 start, u32 count, const char *type)
     fb_info(line);
 }
 
-/*
- * Column header. Written as its own function rather than by passing zeros
- * through pt_line(), which printed the start/count headings as "00000000".
- * The padding targets match pt_line's layout exactly: name at 0, start at 11,
- * count at 20, type at 29.
- */
+/* Column header. Padding targets match pt_line's layout: name at 0, start at
+ * 11, count at 20, type at 29. */
 static void pt_header(void)
 {
     char line[FB_RESPONSE_MAX];
@@ -346,10 +319,8 @@ static const char *pt_typename(u32 type)
 }
 
 /*
- * Armed streaming source for `upload`. Nothing is buffered: `oem partition
- * dump` only records what to send, and the upload streams straight off the
- * eMMC a chunk at a time. That is what removes the size limit -- a 681 MB
- * partition needs no more memory than a 4 MB one.
+ * Armed streaming source for `upload`. Nothing is buffered; the arming
+ * commands only record what to send, so size is not bounded by memory.
  */
 enum upload_kind {
     UPLOAD_NONE = 0,
@@ -374,10 +345,9 @@ static struct {
 /* One monitor command per chunk, so a stalled read cannot wedge the whole
  * transfer and USB keeps getting serviced between them. */
 #define CETUS_NOR_CHUNK     0x1000u
-#define CETUS_FLASH_SIZE    0x4000000u
-
-/* One monitor command per chunk; small enough to keep USB serviced. */
 #define CETUS_DUMP_CHUNK    4096
+
+#define CETUS_FLASH_SIZE    0x4000000u
 
 /* Copy the next whitespace-delimited token, returning where it stopped. */
 static const char *parse_token(const char *s, char *out, u32 max)
@@ -483,12 +453,9 @@ static int resolve_part(const char *name, u32 *dev, u32 *start, u32 *sectors,
         *dev = 0;
         *start = le32(e);
         *sectors = le32(e + 4);
-        /*
-         * Only the SDM2 slots carry the partition AES-XTS. The boot hardware
-         * partitions use a different key entirely, and bare "nflasha" spans
-         * the plaintext partition table as well as the encrypted slots, so
-         * neither can be transparently decrypted.
-         */
+        /* Only the SDM2 slots carry the partition AES-XTS: the boot hardware
+         * partitions use a different key, and bare "nflasha" spans the
+         * plaintext partition table as well. */
         if (encrypted)
             *encrypted = 1;
     }
@@ -544,7 +511,6 @@ static void cmd_partition_dump(const char *args)
     upload_src.sectors = want;
     upload_src.decrypt = encrypted;
 
-    /* The arming is silent; the only thing worth saying is what to run next. */
     n = str_append(line, 0, sizeof(line), "hint: fastboot get_staged ");
     n = str_append(line, n, sizeof(line), name);
     n = str_append(line, n, sizeof(line), ".bin");
@@ -573,16 +539,9 @@ static void cmd_upload(void)
         n += hex_format(line + n, upload_src.len, 8);
         usb_bulk_send(line, n);
 
-        /*
-         * Staged through download_buf rather than sent straight from the
-         * source. The USB controller's own AXI master would have to reach the
-         * ROM window for a direct send to work, and there is no reason to
-         * assume it can; the copy costs nothing at this size and only ever
-         * touches memory the DMA arena already covers.
-         *
-         * 32-bit loads throughout: with the MMU off these are Device-nGnRnE,
-         * where an unaligned access faults.
-         */
+        /* Staged through download_buf: the DWC3's AXI master is not assumed
+         * to reach the ROM window. 32-bit loads, since these are Device
+         * accesses. */
         while (done < upload_src.len) {
             u32 chunk = upload_src.len - done;
             u32 *out = (u32 *)download_buf;
@@ -675,12 +634,8 @@ static void cmd_upload(void)
                             chunk) != MMC_OK)
             return;
 
-        /*
-         * XTS restarts its tweak every sector, so this is necessarily one
-         * crypto job per sector -- contiguity buys nothing. The tweak is the
-         * ABSOLUTE sector number, not an offset within the partition, which
-         * is why upload_src.start is added back in.
-         */
+        /* The tweak is the ABSOLUTE sector number, not an offset into the
+         * partition. */
         if (upload_src.decrypt) {
             u32 i;
 
@@ -700,17 +655,13 @@ static void cmd_upload(void)
     fb_okay("");
 }
 
-/* Crypto failure during a flash. Not an eMMC condition, but it travels the
- * same return path, so it gets a code that cannot collide with enum
- * mmc_status. */
+/* Travels the same return path as enum mmc_status, so it must not collide. */
 #define FLASH_ERR_CRYPTO    (-20)
 
 /*
- * Report an eMMC failure with everything needed to tell the causes apart: the
- * driver's own return code, the controller's Error Interrupt Status, and the
- * card's R1 status. The last one is the only place a write-protect violation
- * ever appears, so it is called out by name rather than left to be decoded
- * from a hex word.
+ * rc, the controller's Error Interrupt Status and the card's R1 -- the only
+ * place a write-protect violation appears, so it is named rather than left to
+ * be decoded from the hex.
  */
 static void flash_fail(const char *what, int rc)
 {
@@ -743,21 +694,15 @@ static void flash_fail(const char *what, int rc)
 
 /* ---- flash -------------------------------------------------------------- */
 
-/* Same 64 KiB granule as the dump path, for the same reason: it keeps any one
- * eMMC command's busy window short without costing round trips. */
+/* Keeps any one eMMC command's busy window short without costing round trips. */
 #define FLASH_CHUNK_SECTORS  DUMP_CHUNK_SECTORS
 
 /*
- * Sparse image format, as produced by libsparse.
- *
- * Supporting it is not optional for anything large. The host will not send
- * more than max-download-size in one transfer, so it converts any bigger image
- * -- including a plain raw one -- into a series of sparse images each under
- * that limit, and sends them as separate download/flash pairs. Every split
- * describes the whole output space: the ones after the first open with a
- * DONT_CARE chunk spanning everything already written, and that is the only
- * thing that puts the write cursor back where it belongs. No offset is
- * communicated any other way.
+ * Sparse image format, as produced by libsparse. The host converts anything
+ * over max-download-size into a series of sparse images sent as separate
+ * download/flash pairs; each split after the first opens with a DONT_CARE
+ * chunk spanning what is already written, which is the only thing that
+ * communicates the offset.
  */
 #define SPARSE_MAGIC                0xed26ff3au
 #define SPARSE_HEADER_SIZE          28
@@ -777,13 +722,8 @@ static u16 le16(const u8 *p)
 static u8 fill_buf[FLASH_CHUNK_SECTORS * SECTOR_SIZE] DMA_SECTION;
 
 /*
- * Ciphertext staging for an encrypted target.
- *
- * Encryption cannot be done in place in the caller's buffer. A sparse FILL
- * chunk writes the same fill_buf repeatedly at different sector offsets, and
- * every sector needs its own tweak -- encrypting fill_buf in place would
- * consume the pattern on the first chunk and write nonsense afterwards.
- * Staging through a separate buffer leaves every source untouched.
+ * Ciphertext staging: a sparse FILL chunk writes fill_buf repeatedly at
+ * different tweaks, so encryption cannot be done in place.
  */
 static u8 crypt_buf[FLASH_CHUNK_SECTORS * SECTOR_SIZE] DMA_SECTION;
 
@@ -795,17 +735,10 @@ static struct {
     int encrypt;        /* wrap in the partition AES-XTS on the way in */
 } flash_dst;
 
-/* Sectors actually put on the card by this command; skipped ones do not
- * count, which is what makes the reported total meaningful for a sparse
- * image. */
+/* Skipped sparse chunks do not count. */
 static u32 flash_written;
 
-/*
- * Write `n` sectors at sector `off` within the resolved target.
- *
- * Bounds are checked here rather than in the callers so that every path --
- * raw image, sparse RAW chunk, sparse FILL -- is covered by the same test.
- */
+/* Write `n` sectors at sector `off` within the resolved target. */
 static int flash_sectors(u32 off, const u8 *src, u32 n)
 {
     if (off > flash_dst.sectors || n > flash_dst.sectors - off)
@@ -818,11 +751,8 @@ static int flash_sectors(u32 off, const u8 *src, u32 n)
         const u8 *out = src;
         int rc;
 
-        /*
-         * Tweaks are ABSOLUTE sector numbers, the same ones the dump path
-         * uses, so that what is written here reads back through `dump` as the
-         * image that went in.
-         */
+        /* Tweaks are ABSOLUTE sector numbers, the same ones the dump path
+         * uses. */
         if (flash_dst.encrypt) {
             u32 i;
 
@@ -895,15 +825,8 @@ static int flash_sparse(const u8 *img, u32 len, const char **err)
     total_blks   = le32(img + 16);
     total_chunks = le32(img + 20);
 
-    /*
-     * The header sizes must be multiples of 4, not merely large enough. With
-     * the MMU off every access is Device-nGnRnE, where an unaligned load
-     * faults -- and a RAW chunk's payload is written straight out of this
-     * buffer by a driver that reads it 32 bits at a time. An odd header size
-     * would put that payload off alignment and hang the payload with no output
-     * at all. The values libsparse writes (28 and 12) are both fine; this is
-     * about what a malformed image could do.
-     */
+    /* Multiples of 4, not merely large enough: a RAW chunk's payload is read
+     * 32 bits at a time out of this buffer, and these are Device accesses. */
     if (hdr_sz < SPARSE_HEADER_SIZE || (hdr_sz & 3) ||
         chunk_hdr_sz < SPARSE_CHUNK_HEADER_SIZE || (chunk_hdr_sz & 3)) {
         *err = "bad sparse header size";
@@ -916,11 +839,8 @@ static int flash_sparse(const u8 *img, u32 len, const char **err)
 
     spb = blk_sz / SECTOR_SIZE;
 
-    /*
-     * Every split of a resparsed image carries the whole image's block count,
-     * so an oversized image is rejected on the first split rather than part
-     * way through being written.
-     */
+    /* Every split carries the whole image's block count, so an oversized
+     * image is rejected on the first rather than part way through. */
     if (total_blks > flash_dst.sectors / spb) {
         *err = "image is larger than the partition";
         return -1;
@@ -1006,12 +926,8 @@ static int flash_sparse(const u8 *img, u32 len, const char **err)
 }
 
 /*
- * `fastboot flash <name>` -- write the staged download to a partition.
- *
- * Takes either a raw image, which goes to sector 0 of the partition, or a
- * sparse one, which places itself. Which it is is decided by the magic, since
- * the host converts to sparse on its own initiative whenever an image is too
- * big to send in one download.
+ * `fastboot flash <name>`. A raw image goes to sector 0 of the partition; a
+ * sparse one places itself.
  */
 static void cmd_flash(const char *name)
 {
@@ -1053,12 +969,8 @@ static void cmd_flash(const char *name)
         return;
     }
 
-    /*
-     * The magic alone decides, not the magic plus a plausible length. An image
-     * that starts with it and is then too short to parse is a truncated sparse
-     * image, and writing its header to the card as though it were data is the
-     * one outcome worth ruling out.
-     */
+    /* The magic alone decides: a truncated sparse image must not be written
+     * to the card as though it were data. */
     if (download_len >= 4 && le32(download_buf) == SPARSE_MAGIC) {
         rc = flash_sparse(download_buf, download_len, &err);
         if (err) {
@@ -1079,12 +991,7 @@ static void cmd_flash(const char *name)
             return;
         }
 
-        /*
-         * Zero the slack in the final sector. Without this the tail of an
-         * image whose size is not a multiple of 512 would be padded with
-         * whatever the previous download left there -- the buffer is never
-         * cleared between commands.
-         */
+        /* The download buffer is never cleared between commands. */
         for (n = download_len; n < nsec * SECTOR_SIZE; n++)
             download_buf[n] = 0;
 
@@ -1113,28 +1020,19 @@ static void cmd_partition(void)
 
     pt_header();
 
-    /*
-     * The two eMMC boot hardware partitions. They are not in the SDM2 table --
-     * that table describes the user area only -- so they are listed from what
-     * the hardware layout guarantees: each starts at its own sector 0.
-     */
+    /* Not in the SDM2 table, which describes the user area only. Each starts
+     * at its own sector 0. */
     pt_line("nflashaB0", 0, BOOT_PART_SECTORS, "raw");
     pt_line("nflashaB1", 0, BOOT_PART_SECTORS, "raw");
 
-    /* SDM2 table: sector 0 of the user area. */
     /* Startup init may have failed (card asleep, powered late). Retry now
      * rather than reporting a stale failure. */
     if (!mmc_ready)
         init_rc = mmc_init();
 
     if (!mmc_ready) {
-        /*
-         * Identification is the failure, so report what mmc_init() knows --
-         * which step died, the OCR it got, the controller error. Without this
-         * the message below would say only that the read failed, discarding
-         * the part that actually says why. mmc_init_step: 1 CMD0, 2 CMD1,
-         * 3 CMD2, 4 CMD3, 5 CMD7, 6 BUS_WIDTH, 7 HS_TIMING.
-         */
+        /* mmc_init_step: 1 CMD0, 2 CMD1, 3 CMD2, 4 CMD3, 5 CMD7,
+         * 6 BUS_WIDTH, 7 HS_TIMING. */
         n = str_append(line, 0, sizeof(line), "mmc init rc ");
         n += hex_format(line + n, (u32)init_rc, 2);
         n = str_append(line, n, sizeof(line), " step ");
@@ -1148,8 +1046,8 @@ static void cmd_partition(void)
         return;
     }
 
-    /* The SDM2 table exists only in the user area -- boot0 holds the EXBL
-     * Information Sector and boot1 is blank -- so there is nothing to select. */
+    /* The SDM2 table is in the user area; boot0 holds the EXBL Information
+     * Sector and boot1 is blank. */
     rc = mmc_select_partition(0);
     if (rc == MMC_OK)
         rc = mmc_read_blocks(0, pt_buf, PT_SECTORS);
@@ -1173,14 +1071,9 @@ static void cmd_partition(void)
         n_part = PT_MAX_ENTRIES;
 
     /*
-     * The bare "nflasha" device is the whole user area -- the raw disk the
-     * dump script reads, before any partition is carved out of it.
-     *
-     * Its true size is EXT_CSD[212] SEC_COUNT, which the ROM gives us no way
-     * to read, so what is printed is the extent the partition table actually
-     * covers: the highest start+count over valid entries. That is a lower
-     * bound on the device size, not the device size, and the summary line says
-     * so rather than letting the number be mistaken for the real capacity.
+     * "nflasha" is the whole user area. Its true size is EXT_CSD[212]
+     * SEC_COUNT, which is not readable from here, so what is printed is the
+     * highest start+count over valid entries -- a lower bound.
      */
     for (i = 0; i < n_part; i++) {
         const u8 *e = pt_buf + 32 + i * 16;
@@ -1201,9 +1094,8 @@ static void cmd_partition(void)
         u32 type  = le32(e + 8);
         u32 flag  = le32(e + 12);
 
-        /* SDM_LABEL_VALID. Invalid entries are skipped but still consume an
-         * index, because the device name is derived from the slot, not from
-         * the position in the printed list. */
+        /* SDM_LABEL_VALID. Invalid entries still consume an index: the
+         * device name comes from the slot, not the printed position. */
         if (!(flag & 1))
             continue;
 
@@ -1220,15 +1112,8 @@ static void cmd_partition(void)
 /* ---- oem exec ----------------------------------------------------------- */
 
 /*
- * Make instruction fetches see memory that was written by something other than
- * the CPU's own stores -- i.e. anything the USB controller DMA'd in.
- *
- * With the MMU off, data accesses are Device-nGnRnE (uncached), so the D-side
- * needs nothing. Instruction fetches are a separate question: SCTLR.I is
- * independent of SCTLR.M, so the I-cache can be live even with the MMU off,
- * and it may hold stale lines for an address we just downloaded into.
- * IC IALLU invalidates the lot, which costs nothing here and avoids having to
- * know the length of the code being run.
+ * SCTLR.I is independent of SCTLR.M, so the I-cache can be live with the MMU
+ * off and hold stale lines for an address just downloaded into.
  */
 static inline void sync_icache(void)
 {
@@ -1244,10 +1129,7 @@ static inline void sync_icache(void)
  * `fastboot oem exec:<addr>` -- call addr as a function and report what it
  * returns.
  *
- * The callee runs at EL3 with our stack and is trusted to obey the AAPCS64
- * calling convention. If it clobbers callee-saved registers or the stack, or
- * simply never returns, this payload is gone and the camera needs a re-push;
- * that is inherent to the command, not a bug.
+ * The callee runs at EL3 on our stack and is trusted to obey AAPCS64.
  */
 static void cmd_exec(const char *args)
 {
@@ -1261,15 +1143,14 @@ static void cmd_exec(const char *args)
         fb_fail("usage: oem exec:<addr>");
         return;
     }
-    /* AArch64 instructions are word-aligned; branching elsewhere is a PC
-     * alignment fault, which from here is an invisible hang. */
+    /* A misaligned branch is a PC alignment fault. */
     if (addr & 3) {
         fb_fail("address must be 4-byte aligned");
         return;
     }
 
-    /* Announce BEFORE jumping, so a callee that never returns looks different
-     * from a command that was rejected. */
+    /* Before jumping, so a callee that never returns looks different from a
+     * command that was rejected. */
     n = str_append(line, 0, sizeof(line), "calling ");
     n += hex_format(line + n, addr, 16);
     line[n] = 0;
@@ -1287,14 +1168,7 @@ static void cmd_exec(const char *args)
 
 /* ---- oem dumpbrom ------------------------------------------------------- */
 
-/*
- * `fastboot oem dumpbrom` -- stage the mask ROM for `get_staged`.
- *
- * 0xFFFF0000..0xFFFFBFFF, the window the memory map gives for the BootROM.
- * Nothing locks it out from here: the payload runs at EL3, and `oem peek`
- * already reads the same region a word at a time. This just makes taking the
- * whole thing one command instead of 3072 of them.
- */
+/* `fastboot oem dumpbrom` -- stage the mask ROM for `get_staged`. */
 #define BROM_BASE   0xFFFF0000ull
 #define BROM_SIZE   0xC000
 
@@ -1308,16 +1182,6 @@ static void cmd_dumpbrom(void)
 }
 
 /* ---- oem darwin --------------------------------------------------------- */
-
-/*
- * The Darwin link, and with it the Virtual WDT.
- *
- * Everything here is deliberately exposed as separate steps rather than one
- * "make it stop" command. The transport is unverified on hardware: if it does
- * not work, `darwin` and `darwin read` say so without changing any state, and
- * a wrong guess about SIO gets diagnosed from the host rather than by
- * reflashing.
- */
 
 static void darwin_show_bytes(const char *what, const u8 *b, u32 n)
 {
@@ -1333,17 +1197,8 @@ static void darwin_show_bytes(const char *what, const u8 *b, u32 n)
     fb_info(line);
 }
 
-/*
- * `oem darwin` -- report the watchdog without touching it.
- *
- * A reload byte of 00 means vwdt_set is a no-op and that channel can never be
- * armed; 0A means the AP populated Darwin's config during a normal boot this
- * power cycle, so the two also say which regime a boot is in.
- *
- * A counter of FF is the disabled sentinel vwdt_tick skips. 00 means the tick
- * is not running at all: a live tick decrements 00 to FF and stores it back
- * within one 100 ms period, so a stable 00 cannot be a running watchdog.
- */
+/* `oem darwin` -- report the watchdog without touching it. See
+ * darwin_vwdt_state() for how to read the two rows. */
 static void cmd_darwin_state(void)
 {
     u8 counters[4], reloads[3];
@@ -1359,11 +1214,8 @@ static void cmd_darwin_state(void)
     fb_okay("");
 }
 
-/*
- * `oem darwin peek:<addr>[:<len>]` -- the Darwin-side counterpart to
- * `oem peek`, over command 0x16. Darwin does not bounds check reads, so this
- * reaches its flash as well as its RAM.
- */
+/* `oem darwin peek:<addr>[:<len>]`, over command 0x16. Darwin does not bounds
+ * check reads, so this reaches its flash as well as its RAM. */
 static void cmd_darwin_peek(const char *args)
 {
     const char *p;
@@ -1472,9 +1324,8 @@ static void cetus_report_payload(void)
         return;
     }
 
-    /* In the order the bytes arrive -- manufacturer, type, density -- which
-     * is how a datasheet lists them. Printing the assembled word instead
-     * reverses them and reads like a different part entirely. */
+    /* In arrival order -- manufacturer, type, density -- as a datasheet lists
+     * them; the assembled word reads reversed. */
     n = str_append(line, n, sizeof(line), "payload running, flash ");
     for (i = 0; i < 3; i++) {
         n += hex_format(line + n, (id >> (8 * i)) & 0xFF, 2);
@@ -1500,11 +1351,7 @@ static void cmd_cetus_state(void)
     fb_okay("");
 }
 
-/*
- * Reset the CP and put the bundled payload back on it -- the same thing init
- * does. There is no command for the bare ROM monitor because the payload
- * answers everything it does and more.
- */
+/* Reset the CP and put the bundled payload back on it, as init does. */
 static void cmd_cetus_reset(void)
 {
     int rc = cetus_bring_up();
@@ -1680,11 +1527,8 @@ static void cmd_cetus_load(const char *args)
 }
 
 /*
- * `oem cetus dumpbrom` -- stage the CP's mask ROM for `get_staged`.
- *
- * The same window as the AP's own, and the only way to read it: the CP has no
- * Linux to dump it from, and the byte-sum trick that first recovered it cost a
- * round trip per byte.
+ * `oem cetus dumpbrom` -- stage the CP's mask ROM for `get_staged`. The same
+ * window as the AP's own.
  */
 #define CETUS_BROM_BASE 0xFFFF0000u
 #define CETUS_BROM_SIZE 0xC000u
@@ -1732,9 +1576,8 @@ static void cmd_cetus_rate(const char *args)
 }
 
 /*
- * `oem cetus norcmd:<op>[:<len>[:<dummy>[:<addr>]]]` -- issue one flash
- * command and print what comes back. Identifying the part and reading SFDP
- * both need this, and neither goes anywhere near the read path.
+ * `oem cetus norcmd:<op>[:<len>[:<dummy>[:<addr>]]]` -- one flash command,
+ * printing what comes back. RDID and SFDP both need this.
  */
 static void cmd_cetus_norcmd(const char *args)
 {
@@ -1776,11 +1619,8 @@ static void cmd_cetus_norcmd(const char *args)
 }
 
 /*
- * `oem cetus dumpnor[:<off>[:<len>]]` -- stage the CP's raw NOR.
- *
- * The flash is only reachable by code running on the CP, so this needs the
- * bundled payload up. Contents are whatever is on the part, decrypted by
- * nobody.
+ * `oem cetus dumpnor[:<off>[:<len>]]` -- stage the CP's raw NOR. Needs the
+ * bundled payload up; the contents are not decrypted.
  */
 static void cmd_cetus_dumpnor(const char *args)
 {
@@ -1803,8 +1643,7 @@ static void cmd_cetus_dumpnor(const char *args)
         return;
     }
 
-    /* Prove the payload is there and the flash answers before arming: a
-     * failure during the upload itself can only truncate the transfer. */
+    /* A failure during the upload itself can only truncate the transfer. */
     rc = cetus_nor_read(off, cetus_buf, 0x40);
     if (rc != 0) {
         cetus_fail("no NOR read (see: oem cetus)", rc);
@@ -1973,12 +1812,8 @@ static void cmd_oem(const char *args)
 /* ---- getvar ------------------------------------------------------------- */
 
 /*
- * `getvar partition-size:<name>`, in bytes.
- *
- * The host asks for this before every flash, to decide whether the image has
- * an AVB footer to preserve. Without an answer it warns about a zero-sized
- * partition on every single flash, which is noise -- and resolve_part()
- * already knows the number.
+ * `getvar partition-size:<name>`, in bytes. The host asks before every flash;
+ * without an answer it warns about a zero-sized partition each time.
  */
 static void cmd_getvar_partition_size(const char *name)
 {
@@ -1986,9 +1821,7 @@ static void cmd_getvar_partition_size(const char *name)
     u32 dev, start, sectors, n;
 
     if (resolve_part(name, &dev, &start, &sectors, 0) != 0) {
-        /* Same as any unknown variable: OKAY with an empty value. The host
-         * reads that as "no size available" and moves on, which is the right
-         * answer for a name that does not resolve. */
+        /* OKAY with an empty value, as for any unknown variable. */
         fb_okay("");
         return;
     }
@@ -2063,10 +1896,9 @@ static void cmd_download(const char *args)
 /* ---- reboot ------------------------------------------------------------- */
 
 /*
- * fb_okay() is synchronous -- it returns only once the IN transfer completes --
- * so the reply is on the wire by the time we get here. Dropping the D+ pullup
- * before the reset turns "vanished mid-bus" into a clean unplug; 50 ms is well
- * past the 2.5 us the spec needs to call it a disconnect.
+ * fb_okay() returns only once the IN transfer completes, so the reply is on
+ * the wire. Dropping the D+ pullup before the reset makes the host see a clean
+ * unplug rather than a device vanishing mid-bus.
  */
 static void cmd_reboot(void)
 {
@@ -2111,19 +1943,12 @@ void fastboot_loop(void)
     for (;;) {
         u32 n;
 
-        usb_state = USB_STATE_FB_LOOP_TOP;
-
         /* Deferred from SET_CONFIGURATION; safe to do here. */
         usb_bulk_enable_pending();
 
-        /*
-         * A host that stopped reading mid-reply is recoverable: drop the
-         * abandoned transfer and take the next command. Anything else keeps
-         * servicing control traffic rather than stopping -- led_fail() used to
-         * be called here, and because it loops forever without pumping events
-         * it took ep0 down with it, killing the status-descriptor channel that
-         * exists to diagnose this exact situation.
-         */
+        /* A host that stopped reading mid-reply is recoverable. Anything else
+         * keeps pumping events rather than stopping, since a loop that does
+         * not takes ep0 down with it. */
         if (usb_bulk_error && usb_bulk_recover() != 0) {
             usb_event_pump();
             continue;

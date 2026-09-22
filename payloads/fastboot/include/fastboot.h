@@ -3,10 +3,7 @@
 
 #include "io.h"
 
-/*
- * Fastboot command loop. Never returns. Assumes the device is configured and
- * the bulk endpoints are live.
- */
+/* Assumes the device is configured and the bulk endpoints are live. */
 __attribute__((noreturn)) void fastboot_loop(void);
 
 #endif /* FASTBOOT_FASTBOOT_H */

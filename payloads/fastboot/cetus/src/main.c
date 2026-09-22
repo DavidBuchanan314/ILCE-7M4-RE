@@ -16,11 +16,7 @@ int main(void)
     mbox.status = ST_RUNNING;
     mbox_step(STEP_ENTERED);
 
-    /*
-     * The flash is brought up once, here, rather than per command: the ROM's
-     * sequence has to run before the part answers anything, and repeating it
-     * on every request would make each one cost the settling delay.
-     */
+    /* Once, not per command: the bring-up carries a settling delay. */
     if (ospi_init() != 0) {
         mbox.status = ST_TIMEOUT;
         mbox_step(STEP_HALTED);
@@ -29,10 +25,7 @@ int main(void)
         mbox_step(STEP_READY);
     }
 
-    /*
-     * Answer on the same link the monitor used. Entering this payload took
-     * the ROM's monitor away; this puts an equivalent one back, so the AP
-     * never loses the CP and no reset is needed to collect results.
-     */
+    /* Entering this payload took the ROM's monitor away; put an equivalent
+     * one back on the same link. */
     monitor_loop();
 }

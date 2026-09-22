@@ -4,21 +4,18 @@
 /*
  * System Control Unit -- clock gates and resets.
  *
- * Base and layout from cxd90057.dtsi (scu@F1388000, clock-controller@0,
- * rst@300), drivers/clk/cxd/cxd-clk.h (SET_REG_OFS/CLR_REG_OFS) and
- * drivers/reset/reset-cxd900xx.c (bank * 16 + 0/4/8).
+ * Base and layout from arch/arm64/boot/dts/cxd/cxd90057.dtsi:168 (scu@F1388000,
+ * clock-controller@0 at :175, rst@300 at :182), drivers/clk/cxd/cxd-clk.h:17
+ * and drivers/reset/reset-cxd900xx.c:47 (bank * 16 + 0/4/8).
  *
  * Both controllers use the same three-register-per-bank pattern:
  *   +0x0  status  (readable; 1 = clock enabled / reset asserted)
  *   +0x4  set     (write-only, W1S)
  *   +0x8  clear   (write-only, W1C)
- *
- * Confirmed on hardware: reading +0x4/+0x8 returns 0 on both the SCU and the
- * GPIO block, consistent with write-only set/clear.
  */
 #define SCU_BASE            0xF1388000ull
 
-/* Clock gate bank 0. USB gates live here; see clk-cxd-900xx.c:98-101. */
+/* Clock gate bank 0. USB gates live here. */
 #define SCU_CLK_STS         (SCU_BASE + 0x000)
 #define SCU_CLK_SET         (SCU_BASE + 0x004)
 #define SCU_CLK_CLR         (SCU_BASE + 0x008)

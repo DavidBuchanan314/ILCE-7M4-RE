@@ -9,14 +9,7 @@ void timer_init(void)
     write32(TIMER0_CTRL,   TIMER0_CTRL_RUN);
 }
 
-/*
- * Unlike the ROM's delay, this is relative to *now* rather than to the last
- * timer restart, so it nests and interleaves safely and never needs to disturb
- * the running counter.
- *
- * The unsigned subtraction is deliberate: it stays correct across the 32-bit
- * wrap, so a long LED output run cannot hang in here.
- */
+/* Relative to now, so it nests; the unsigned subtraction survives the wrap. */
 void udelay(u32 usec)
 {
     u32 start = timer_ticks();
@@ -28,8 +21,7 @@ void udelay(u32 usec)
 
 void mdelay(u32 msec)
 {
-    /* Split rather than multiplying up: msec * 4000 would overflow a u32 at
-     * about 1073 s, and this keeps each udelay well inside a counter wrap. */
+    /* msec * 4000 would overflow a u32 at ~1073 s. */
     while (msec--)
         udelay(1000);
 }

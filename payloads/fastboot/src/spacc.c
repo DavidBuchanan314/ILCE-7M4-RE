@@ -3,11 +3,8 @@
 #include "io.h"
 
 /*
- * See spacc.h for the register map's provenance and the live core readback.
- *
- * One job per 512-byte sector is not a choice: XTS restarts its tweak at every
- * sector, so sectors cannot be batched into one job however contiguous they
- * are on the card.
+ * XTS restarts its tweak every sector, so sectors cannot be batched into one
+ * job however contiguous they are on the card.
  */
 
 u32 spacc_last_status;
@@ -15,22 +12,16 @@ u32 spacc_last_status;
 #define SPACC_CTX_INDEX     0
 #define SECTOR_SIZE         512
 
-/* Job timeout. A 512-byte AES job is sub-microsecond; this is only here so a
- * wedged core reports instead of hanging the payload. */
+/* A 512-byte AES job is sub-microsecond. */
 #define SPACC_TIMEOUT_TICKS (TIMER0_HZ / 10)    /* 100 ms */
 
 /*
- * The AES-XTS key the user-area partitions are encrypted with.
+ * The AES-XTS key for the user-area partitions, derived on the host by
+ * scripts/parse_emmc_partitions.py from the bootrom's scrambling table at
+ * 0xFFFFB800 and an offset table in the eMMC loader image.
  *
- * Derived on the host by scripts/parse_emmc_partitions.py, which indexes the
- * bootrom's key scrambling table at 0xFFFFB800 with an offset table taken from
- * the eMMC loader image. Embedded rather than derived at runtime because that
- * loader is precisely what this payload replaces -- deriving it here would
- * mean decrypting boot0 first, with a different key, to get the offsets.
- *
- * Consequence: this is the key for THIS bootrom and THIS loader version. On
- * another model, or another firmware revision that moves the offset table, it
- * is simply wrong and every sector comes out as noise.
+ * Specific to this bootrom and this loader version: a revision that moves the
+ * offset table makes every sector come out as noise.
  */
 static const u8 part_key[64] = {
     0x16, 0x2c, 0x2a, 0x3b, 0x4b, 0xc1, 0x0d, 0xa3,
@@ -44,10 +35,8 @@ static const u8 part_key[64] = {
 };
 
 /*
- * Source and destination descriptor tables. A DDT is a zero-terminated list of
- * {32-bit address, 32-bit length} pairs -- one entry each here, since a sector
- * is contiguous. The addresses are physical; with the MMU off that is the same
- * number the CPU uses.
+ * A DDT is a zero-terminated list of {32-bit address, 32-bit length} pairs --
+ * one entry each here, since a sector is contiguous. Addresses are physical.
  */
 #define DMA_SECTION __attribute__((section(".usbdma"), aligned(64)))
 
@@ -62,11 +51,9 @@ static inline u64 ctx_page(void)
     return SPACC_CTX_CIPH_KEY + (u64)SPACC_CTX_INDEX * 128;
 }
 
-/*
- * Context memory is written as 32-bit words, little-endian, matching the
- * driver's pdu_to_dev32_s() on a little-endian host. Byte stores into the
- * context page are not used: it is register space, not memory.
- */
+/* Register space, not memory: 32-bit little-endian words only, as
+ * pdu_to_dev32_s() writes it at
+ * elpspacc/driver/src/core/elpspacc/spacc_set_context.c:89. */
 static void ctx_write(u32 off, const u8 *data, u32 len)
 {
     u32 i;
@@ -100,8 +87,7 @@ int spacc_xts_sector(void *dst, const void *src, u32 sector, int encrypt)
     if (!spacc_ready)
         spacc_init();
 
-    /* The tweak is the absolute sector number, 16 bytes little-endian --
-     * the same value scripts/parse_emmc_partitions.py uses. */
+    /* The tweak is the absolute sector number, 16 bytes little-endian. */
     for (i = 0; i < 16; i++)
         tweak[i] = (i < 4) ? (u8)(sector >> (i * 8)) : 0;
     ctx_write(SPACC_CTX_XTS_IV, tweak, 16);
@@ -128,11 +114,9 @@ int spacc_xts_sector(void *dst, const void *src, u32 sector, int encrypt)
     write32(SPACC_REG_IV_OFFSET, 0);
     write32(SPACC_REG_AUX_INFO, 0);
 
-    /*
-     * KEY_SZ takes half the combined key length for XTS -- 32, not 64 -- with
-     * bit 31 marking it as the cipher (rather than hash) key size and the
-     * context index in bits 15:8.
-     */
+    /* KEY_SZ is half the combined key length for XTS -- 32, not 64 -- with bit
+     * 31 marking it a cipher key size and the context index in bits 15:8
+     * (elpspacc/export/elpspacchw.h:364). */
     write32(SPACC_REG_KEY_SZ, 32u | BIT(31) | (SPACC_CTX_INDEX << 8));
 
     write32(SPACC_REG_SW_CTRL, 0);
@@ -144,7 +128,9 @@ int spacc_xts_sector(void *dst, const void *src, u32 sector, int encrypt)
         ctrl |= SPACC_CTRL_ENCRYPT;
 
     dsb();
-    write32(SPACC_REG_CTRL, ctrl);      /* starts the job */
+    /* CTRL last: writing it is what starts the job, as at
+     * elpspacc/driver/src/core/elpspacc/spacc_packet_enqueue_ddt.c:120. */
+    write32(SPACC_REG_CTRL, ctrl);
     dsb();
 
     /* Wait for the job to reach the status FIFO. */
@@ -154,8 +140,8 @@ int spacc_xts_sector(void *dst, const void *src, u32 sector, int encrypt)
             return SPACC_ERR_TIMEOUT;
     }
 
-    /* Pop first, then read STATUS: the pop is what advances the FIFO to the
-     * entry STATUS reports on. */
+    /* The pop is what advances the FIFO to the entry STATUS reports on
+     * (elpspacc/driver/src/core/elpspacc/spacc_packet_dequeue.c:45). */
     write32(SPACC_REG_STAT_POP, 1);
     dsb();
     sts = read32(SPACC_REG_STATUS);

@@ -2,17 +2,13 @@
 #include "reset.h"
 
 /*
- * XRESET_REQ -- reset request to Darwin, the system power MCU. A real pin;
- * Darwin latches the edge and resets the SoC, so this needs no clocks and no
- * prior state. DARWIN.md 7a.
+ * XRESET_REQ, a real pin: Darwin latches the edge and resets the SoC, so this
+ * needs no clocks and no prior state. Same three writes as cxd90057_reset()
+ * in drivers/udif/mach-cxd900xx/pm_core.c:93; the GPIO bank layout is
+ * DIR +0x00, FUNC +0x30, WDATA +0x40, each with SET at +4 and CLR at +8.
  *
- * Same three writes as cxd90057_reset() in
- * drivers/udif/mach-cxd900xx/pm_core.c, with GPIO(x) = 0xF101D000 + 0x1000*x
- * and the bank layout from mach/regs-gpio.h (DIR +0x00, FUNC +0x30,
- * WDATA +0x40, each with SET at +4 and CLR at +8).
- *
- * The order is load-bearing: the pad mux goes last, so the line is never
- * driven through whatever WDATA happened to hold.
+ * The pad mux goes last, so the line is never driven through whatever WDATA
+ * happened to hold.
  */
 #define GPIO0_BASE      0xF101D000ull
 #define GPIO0_DIR_SET   (GPIO0_BASE + 0x04)

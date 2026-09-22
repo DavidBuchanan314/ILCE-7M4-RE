@@ -4,12 +4,9 @@
 #include "io.h"
 
 /*
- * Bring-up record, at a fixed address so it can be found with no symbols.
- *
- * `step` advances past each point of no return before the link is serving,
- * which is the only way a payload that wedges during init can say where it
- * got to. Once monitor_loop() is running the AP can simply read this with an
- * ordinary peek, since the payload answers those itself.
+ * Bring-up record at a fixed address, so it can be found with no symbols.
+ * `step` advances past each point of no return, which is the only way a
+ * payload that wedges before the link is serving can say where it got to.
  */
 
 #define MBOX_ADDR       0xFE030000u

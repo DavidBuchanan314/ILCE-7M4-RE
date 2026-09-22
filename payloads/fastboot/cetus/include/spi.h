@@ -4,14 +4,10 @@
 #include "io.h"
 
 /*
- * Slave side of the mask ROM's SPI monitor protocol.
+ * Slave side of the mask ROM's SPI monitor protocol. Entered from the monitor,
+ * so the controller is already a 16-bit mode-3 slave with the AP clocking.
  *
- * A payload is entered from the monitor, so the controller is already a
- * 16-bit mode-3 slave with the AP driving the clock. Continuing to speak the
- * same framing means the AP's existing client keeps working and the link
- * survives the hand-off -- the payload simply answers more opcodes.
- *
- * Word layout is [7:0] data, [15:8] tag. Each tag carries a sequence nibble
+ * Word layout is [7:0] data, [15:8] tag, each tag carrying a sequence nibble
  * that restarts at the top of every command.
  */
 
@@ -21,26 +17,21 @@
 #define SPI_TIMEOUT     (-1)
 
 /*
- * The ready word, and the only wait here that is allowed to last forever.
- * Between commands the master is not clocking at all, so blocking until it
- * does is the idle state rather than a fault.
+ * The ready word. Blocks forever: between commands the master is not clocking
+ * at all, so waiting is the idle state.
  */
 void spi_arm(u8 data, u8 tag);
 
 /*
- * Everything below runs inside a command, where the master is actively
- * clocking. A wait that expires there means the two ends disagree about
- * where the frame boundary is, and the only way out is to resynchronise --
- * so these report it rather than hanging the processor.
+ * Inside a command the master is actively clocking, so an expired wait means
+ * the two ends disagree about the frame boundary. These report rather than
+ * hang.
  */
 int spi_send_word(u8 data, u8 tag);
 
 /*
- * Bulk form: queue on FIFO space rather than waiting for an idle bus, and
- * without the 0xFFFF filler. The filler costs a whole frame per byte and only
- * exists so a poll landing early sees something recognisable -- the rolling
- * tag already does that. Waiting for idle here would also stall a master that
- * keeps the bus busy, which is the point of streaming in the first place.
+ * Bulk form: queues on FIFO space, with no 0xFFFF filler -- the rolling tag
+ * already tells an early poll from a real word.
  */
 int spi_send_stream(u8 data, u8 tag);
 

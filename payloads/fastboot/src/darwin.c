@@ -3,38 +3,12 @@
 #include "darwin.h"
 
 /*
- * SIO transport for the Darwin link.
+ * SIO transport for the Darwin link, transcribed from the AP loader's
+ * transaction primitive at 0xFE04DD3C. SIO+0x100 is one 0x80-byte buffer used
+ * in both directions.
  *
- * Every register, value and delay below is read out of the AP's own
- * transaction primitive at 0xFE04DD3C in loader.bin, which runs as
- *
- *      sio_xfer(tx, rx, timeout, check_crc, expected_cmd)
- *
- * and does, per attempt:
- *
- *      SIO[0x10] = 0x01000000              ; enable
- *      SIO[0x14] = (rate & 0xff) << 24     ; rate, split across two regs
- *      SIO[0x18] = (rate << 16) & 0xff000000
- *      SIO[0x00] = 0xD8000000
- *      SIO[0x04] = 0x30000000
- *      XCS low                             ; GPIO port 4 bit 2, active low
- *      wait 0x65 units
- *      SIO[0x08] = 0
- *      SIO[0x0C] = 0x7F000000              ; 0x80 bytes - 1, in bits 31:24
- *      memcpy(SIO+0x100, tx, 0x80)
- *      SIO[0x00] |= 0x20000000             ; go
- *      while (SIO[0x00] & (1 << 29)) ;     ; bit 29 = busy
- *      memcpy(rx, SIO+0x100, 0x80)         ; SAME buffer, both directions
- *      XCS high
- *      wait 0x3E9 units
- *      SIO[0x00]  = 0xC0000000
- *      SIO[0x00] &= ~0x20000000
- *      SIO[0x10] = 0
- *
- * then validates the reply's CRC and command byte and RETRIES the whole
- * exchange until they match or the caller's timeout expires. That retry is
- * the protocol, not error handling: Darwin answers a command in a later
- * exchange, and returns a CRC of 0xFFFF for "nothing ready yet".
+ * Retrying is the protocol, not error handling: Darwin answers a command in a
+ * later exchange, and returns a CRC of 0xFFFF for "nothing ready yet".
  */
 
 #define SIO_CH          0u
@@ -58,9 +32,8 @@
 #define SIO_LEN_VAL     ((u32)(DARWIN_PKT - 1) << 24)
 
 /*
- * Rate index, from the loader's runtime config word. The boot log prints it
- * as `PWD:SIO C[0] P[4] R[3]` -- channel 0, GPIO port 4, rate 3 -- and those
- * are the same three globals the primitive loads (0xFE06A934/938/93C/940).
+ * Rate index, from the loader's runtime config word (0xFE06A934/938/93C/940),
+ * which also fixes channel 0 and GPIO port 4.
  */
 #define SIO_RATE        3u
 
@@ -75,23 +48,16 @@
 #define XCS_CLR         (XCS_GPIO + 0x48)   /* assert low  */
 
 /*
- * The SIO clock and data pads share GPIO port 4 with XCS, and both the
- * bootrom and the loader's teardown ("PWR:Disable SIO ports :set IN-PUP")
- * leave the whole port muxed to GPIO -- FUNC reads 0xFFF. With FUNC set,
- * software owns the pad, so the SIO block shifts against nothing and every
- * reply reads back as zeros even though the block itself is running.
- *
- * Clearing FUNC returns these three to their hardware function. Bit 2 is
- * deliberately NOT in the mask: XCS is driven by us and has to stay GPIO.
+ * The SIO clock and data pads share GPIO port 4 with XCS, and are left muxed
+ * to GPIO by both the bootrom and the loader's teardown. Clearing FUNC returns
+ * them to their hardware function; bit 2 is not in the mask because XCS is
+ * driven by us and stays GPIO.
  */
 #define SIO_PINS        (BIT(0) | BIT(1) | BIT(3))
 
 /*
- * The loader spins on its own tick source for 0x65 and 0x3E9 units around the
- * chip select. That source is not the one timer.h describes and its rate is
- * not established, so these are chosen to satisfy the larger reading (1 unit
- * = 1 us) with margin. Chip-select setup and hold are minimums; being slow
- * costs only throughput.
+ * The loader spins 0x65 and 0x3E9 units of an unidentified tick source. These
+ * assume the slower reading of it; setup and hold are minimums.
  */
 #define CS_SETUP_US     150u
 #define CS_HOLD_US      1200u
@@ -102,8 +68,7 @@
 /* ---- CRC-16/CCITT-FALSE -------------------------------------------------
  *
  * Init 0xFFFF, poly 0x1021, MSB-first, no reflection, no final XOR, over
- * bytes [0x00..0x7D], stored little-endian at 0x7E. The AP computes it in
- * software at 0xFE04D43C; Darwin uses a hardware unit but the same function.
+ * bytes [0x00..0x7D], stored little-endian at 0x7E.
  */
 static u16 darwin_crc16(const u8 *p)
 {
@@ -187,9 +152,8 @@ static int sio_xfer(const u8 *tx, u8 *rx)
 
 void darwin_init(void)
 {
-    /* Idle the chip select high BEFORE handing the pad to the GPIO block,
-     * so switching the mux cannot present a spurious falling edge. Same
-     * ordering rule as the XRESET_REQ sequence in reset.c. */
+    /* Idle high BEFORE handing the pad to the GPIO block, so switching the
+     * mux cannot present a spurious falling edge. */
     write32(XCS_SET,      BIT(XCS_BIT));
     write32(XCS_DIR_SET,  BIT(XCS_BIT));
     write32(XCS_FUNC_SET, BIT(XCS_BIT));
@@ -216,16 +180,10 @@ int darwin_xfer(u8 *tx, u8 *rx, u32 match_len, u32 attempts)
             u32 i;
 
             /*
-             * A CRC of 0xFFFF is Darwin saying "nothing ready yet" -- the
-             * normal case on the first exchange, since a reply lands in a
-             * later one. Anything else that validates is a real reply, but
-             * not necessarily OURS: a call that timed out leaves its reply
-             * unconsumed, and the next command would otherwise accept it.
-             *
-             * Both handlers leave the request header intact in the buffer
-             * they reply from (0x16 bzeroes only from +6), so matching the
-             * leading `match_len` bytes pins the reply to this exact
-             * command, address and length -- not merely to the opcode.
+             * A validating reply is not necessarily ours: a call that timed
+             * out leaves its reply unconsumed. Both handlers leave the request
+             * header intact in the buffer they reply from (0x16 bzeroes only
+             * from +6), so match_len pins it to this command.
              */
             if (want == got) {
                 for (i = 0; i < match_len; i++)
@@ -248,8 +206,7 @@ int darwin_xfer(u8 *tx, u8 *rx, u32 match_len, u32 attempts)
 #define PKT_MAX_PAYLOAD 0x78
 
 
-/* The address field is LITTLE-endian: the shared decoder at file 0x32B44 in
- * darwin_core.bin builds p[0] | p[1]<<8 | p[2]<<16 | p[3]<<24. */
+/* The address field is LITTLE-endian. */
 static void put_addr(u8 *p, u32 v)
 {
     p[0] = (u8)v;
@@ -276,9 +233,7 @@ int darwin_read(u32 addr, u8 *buf, u32 len)
     if (darwin_xfer(tx, rx, PKT_HDR, DARWIN_ATTEMPTS) != 0)
         return -1;
 
-    /* Darwin answers in place: it zeroes its own rx+6 and copies the
-     * requested bytes there, so the payload comes back at the same offset
-     * the request's payload would have occupied. */
+    /* Darwin answers in place, so the payload comes back at PKT_HDR. */
     for (i = 0; i < len; i++)
         buf[i] = rx[PKT_HDR + i];
     return 0;
@@ -308,20 +263,13 @@ int darwin_write_block(u32 off, const u8 *buf, u32 len)
 /* ---- the Virtual WDT ----------------------------------------------------- */
 
 /*
- * Reading these two is what says whether the watchdog is armed at all, and it
- * doubles as a way to tell which regime a boot is in: the AP populates this
- * config over command 0x12 during a normal boot, so a reload of 0x0A means a
- * normal boot has happened this power cycle and 0x00 means it has not.
+ * A reload of 0x0A means the AP populated Darwin's config during a normal boot
+ * this power cycle; 0x00 means it did not, and makes every vwdt_set a no-op.
+ * A counter of 0xFF is the disabled sentinel; 0x00 means the tick is not
+ * running, since a live tick turns 0x00 into 0xFF within one 100 ms period.
  *
- * A reload of 0 makes every vwdt_set a no-op (the cbz at file 0x221C), so the
- * channels can never be armed. A counter of 0xFF is the disabled sentinel
- * vwdt_tick skips; 0x00 means the tick is not running at all, since a live
- * tick turns 0x00 into 0xFF and stores it back within one 100 ms period.
- *
- * If a channel ever does need disarming, the counter table is reachable by
- * command 0x12 even though it is not block-aligned: 83 * 0x78 = 0x26E8, so
- * the table sits 0x14 bytes into block 83 and a 0x18-byte write lands it as
- * that block's last four bytes.
+ * To disarm a channel: 83 * 0x78 = 0x26E8, so the table sits 0x14 bytes into
+ * block 83 and a 0x18-byte command 0x12 write lands it as that block's tail.
  */
 int darwin_vwdt_state(u8 counters[4], u8 reloads[3])
 {

@@ -12,15 +12,9 @@
 #define SSP_SR_BSY      BIT(4)
 
 /*
- * Bounded by iterations, not time: the ROM's timers are not set up in a
- * payload, and this only has to tell "the master stopped mid-command" from
- * "the master is still working".
- *
- * It has to expire well inside the master's own 50 ms deadline, or the master
- * gives up and the command that would have found this end re-armed fails
- * anyway -- costing a whole command per recovery. Waits that legitimately
- * occur inside a command are microseconds, since the master is clocking
- * throughout, so there is a wide margin either side.
+ * Iterations, not time: no timer is set up in a payload. Must expire well
+ * inside the master's own 50 ms deadline; legitimate waits inside a command
+ * are microseconds, since the master is clocking throughout.
  */
 #define SPI_POLL_LIMIT  20000u
 
@@ -45,12 +39,8 @@ static void send_pair(u8 data, u8 tag)
 
 void spi_arm(u8 data, u8 tag)
 {
-    /*
-     * Settling for an idle bus is a courtesy, not a requirement -- queuing
-     * needs FIFO space and nothing more. It is bounded because a controller
-     * left mid-frame can hold BSY indefinitely, and hanging here would undo
-     * the whole point of recovering.
-     */
+    /* Bounded: a controller left mid-frame can hold BSY indefinitely, and
+     * queuing only needs FIFO space anyway. */
     (void)wait_flag(SSP_SR_BSY, 0);
 
     while (!(read32(SSP_SR) & SSP_SR_TNF))
@@ -60,8 +50,7 @@ void spi_arm(u8 data, u8 tag)
         ;
     write32(SSP_DR, (u32)data | ((u32)tag << 8));
 
-    /* Unbounded on purpose: waiting for the master to poll is the idle
-     * state, and it can last as long as it likes. */
+    /* Unbounded: waiting for the master to poll is the idle state. */
     while (!(read32(SSP_SR) & SSP_SR_TFE))
         ;
 }
@@ -107,9 +96,9 @@ int spi_recv_frame(u8 *buf)
 }
 
 /*
- * Every word the master clocks while polling lands in the receive FIFO. They
- * have to go before the next frame is read or it starts mid-stream, which is
- * exactly what the ROM does after each ready word and each ack.
+ * Words the master clocked while polling have to go before the next frame is
+ * read, or it starts mid-stream. The ROM drains after each ready word and ack
+ * for the same reason.
  */
 void spi_drain(void)
 {
@@ -121,14 +110,8 @@ void spi_drain(void)
 }
 
 /*
- * Discard a frame the master abandoned part way. The receive path counts
- * words, so anything left behind would shift every later frame by however
- * many arrived -- and eight unconditional reads empty a FIFO that is only
- * eight deep, so this needs nothing more drastic.
- *
- * Disabling the controller to flush it looks tidier and is not: dropping SSE
- * mid-frame can leave BSY asserted, and then the next send waits on a bus
- * that never goes idle.
+ * Eight unconditional reads empty an eight-deep FIFO. Dropping SSE to flush
+ * instead can leave BSY asserted, with nothing to clear it.
  */
 void spi_resync(void)
 {

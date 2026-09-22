@@ -7,28 +7,20 @@
 /*
  * DWC3 core bring-up for USB 2.0 high-speed device mode.
  *
- * Transcribed from dwc3_core_init() / dwc3_phy_setup() /
- * dwc3_core_setup_global_control() / dwc3_event_buffers_setup() in the
- * camera's own kernel drop, with everything SuperSpeed-only or
+ * Transcribed from drivers/usb/dwc3/core.c -- dwc3_core_init() at :851,
+ * dwc3_phy_setup() at :594, dwc3_core_setup_global_control() at :758,
+ * dwc3_event_buffers_setup() at :448 -- with everything SuperSpeed-only or
  * Linux-infrastructure-only removed.
  *
- * Two settings in here are Sony's rather than stock Synopsys, and both come
- * straight out of dwc3_core_setup_global_control():
- *   - GCTL.PWRDNSCALE = 2, guarded by !CONFIG_ARCH_CXD900XX_FPGA
- *   - the TCA init, which dwc3_core_init() calls unconditionally on non-FPGA
- * The second one is why usb_phy_tca_init() is called from here rather than
- * left as an optional extra: upstream always runs it, including for the Multi
- * connector, so matching it is the low-risk choice while we are working blind.
+ * Two settings in the same file are Sony's rather than stock Synopsys, both
+ * behind !CONFIG_ARCH_CXD900XX_FPGA: GCTL.PWRDNSCALE = 2 at :834 and the TCA
+ * init at :880.
  */
 
 /*
- * Event buffer. The DWC3 is an AXI master and DRAM is not trained in this
- * context, so this has to live in eSRAM -- hence the dedicated .usbdma linker
- * region at 0xFE030000 rather than .bss.
- *
- * With the MMU off, data accesses are Device-nGnRnE (uncached, strongly
- * ordered), so no cache maintenance is needed against the core's view of this
- * memory. If the MMU ever turns out to be on, that changes.
+ * The DWC3 is an AXI master and DRAM is not trained in this context, so the
+ * event buffer has to live in eSRAM -- hence the .usbdma linker region rather
+ * than .bss.
  */
 static u8 event_buffer[DWC3_EVENT_BUFFERS_SIZE]
     __attribute__((section(".usbdma"), aligned(64)));
@@ -50,13 +42,8 @@ static int dwc3_core_soft_reset(void)
 
     while (retries--) {
         if (!(read32(DWC3_DCTL) & DWC3_DCTL_CSFTRST)) {
-            /*
-             * Mandatory on DWC_usb31: "once DWC3_DCTL_CSFTRST bit is cleared,
-             * we must wait at least 50ms before accessing the PHY domain
-             * (synchronization delay). DWC_usb31 programming guide section
-             * 1.3.2." Everything after this touches the PHY domain, so
-             * skipping it is not survivable.
-             */
+            /* DWC_usb31 programming guide 1.3.2: at least 50 ms after
+             * CSFTRST clears before the PHY domain may be accessed. */
             if (is_usb31)
                 mdelay(50);
             return DWC3_OK;
@@ -70,19 +57,17 @@ static void dwc3_phy_setup(void)
 {
     u32 reg;
 
-    /*
-     * SuperSpeed pipe. We are not using it (u3_disable is set in the glue),
-     * but SUSPHY is deliberately left CLEAR here: letting the PHY suspend
-     * during bring-up is a classic way to make the core stop responding, and
-     * upstream only sets it after init completes. Costs power, buys
-     * predictability. Same reasoning for the USB2 block below.
-     */
+    /* SUSPHY stays clear on both PHYs. dwc3_phy_setup() sets it for revisions
+     * above 1.94a (drivers/usb/dwc3/core.c:614
+     * and :700), but its own comment says the part
+     * wants it clear until core initialisation has completed -- and a PHY that
+     * suspends during bring-up stops the core responding. */
     clrbits32(DWC3_GUSB3PIPECTL(0), DWC3_GUSB3PIPECTL_SUSPHY);
 
     reg = read32(DWC3_GUSB2PHYCFG(0));
 
-    /* UTMI+, 8-bit. usb_ss.dtsi says phy_type = "utmi" and notes
-     * "0xc200 bit[3] = 0, ES: 8-bit UTMI+". */
+    /* UTMI+, 8-bit. arch/arm64/boot/dts/cxd/usb_ss.dtsi:57 says phy_type = "utmi" and notes
+     * "0xc200 bit[3] = 0, ES: 8-bit MTMI+" [sic]. */
     reg &= ~DWC3_GUSB2PHYCFG_ULPI_UTMI;
     reg &= ~(DWC3_GUSB2PHYCFG_PHYIF_MASK | DWC3_GUSB2PHYCFG_USBTRDTIM_MASK);
     reg |= DWC3_GUSB2PHYCFG_PHYIF(UTMI_PHYIF_8_BIT);
@@ -120,11 +105,7 @@ static void dwc3_event_buffer_setup(void)
     write32(DWC3_GEVNTADRLO(0), (u32)addr);
     write32(DWC3_GEVNTADRHI(0), (u32)(addr >> 32));
 
-    /*
-     * INTMASK set: we poll GEVNTCOUNT rather than taking interrupts. fastboot
-     * is strictly request/response, so a single-threaded poll loop is
-     * sufficient and it saves setting up the GIC entirely.
-     */
+    /* INTMASK: events still fill the buffer, but raise no interrupt. */
     write32(DWC3_GEVNTSIZ(0),
             DWC3_GEVNTSIZ_SIZE(sizeof(event_buffer)) | DWC3_GEVNTSIZ_INTMASK);
     write32(DWC3_GEVNTCOUNT(0), 0);
@@ -154,9 +135,9 @@ int dwc3_core_init(void)
         return DWC3_ERR_NOT_DWC3;
     }
 
-    /* TCA first: upstream runs it before the core soft reset. Its ACK is
-     * recorded rather than treated as fatal -- a timeout here is informative,
-     * not necessarily a stopper, on a USB-2.0-only link. */
+    /* Before the soft reset, as dwc3_core_init() does at
+     * drivers/usb/dwc3/core.c:882. The ACK
+     * is recorded, not required. */
     tca_acked = (usb_phy_tca_init() == USB_PHY_OK);
 
     ret = dwc3_core_soft_reset();
@@ -167,40 +148,19 @@ int dwc3_core_init(void)
     dwc3_setup_global_control();
     dwc3_set_mode_device();
 
-    /*
-     * High speed, device address 0. SuperSpeed is disabled in the glue, so
-     * advertising anything higher would just produce a device that never
-     * connects.
-     */
+    /* High speed, address 0. SuperSpeed is disabled in the glue. */
     clrsetbits32(DWC3_DCFG, DWC3_DCFG_SPEED_MASK | DWC3_DCFG_DEVADDR_MASK,
                  DWC3_DCFG_HIGHSPEED);
 
     dwc3_event_buffer_setup();
 
     /*
-     * DEVTEN gates whether device events are WRITTEN TO THE EVENT BUFFER at
-     * all -- it is not merely an interrupt mask. dwc3_gadget_disable_irq()
-     * upstream sets it to 0 precisely to stop events being reported.
-     *
-     * This was previously 0, on the mistaken theory that polling meant no
-     * events needed enabling. The part that makes polling work is
-     * GEVNTSIZ.INTMASK (set in dwc3_event_buffer_setup), which suppresses the
-     * interrupt while still filling the buffer. With DEVTEN clear we never saw
-     * USB RESET, so after the host reset the device at the end of enumeration
-     * ep0 was never re-initialised and the device went permanently deaf --
-     * while the event loop carried on looking perfectly healthy.
-     *
-     * Same set as dwc3_gadget_enable_irq(), minus Start/End of Frame.
-     */
-    /*
-     * Only the events we actually act on.
-     *
-     * Upstream additionally enables EOPF and CMDCMPLT, but it services the
-     * event buffer from an interrupt. We poll, and we stop polling entirely
-     * while dwc3_depcmd() waits -- up to 200 ms. EOPF fires every microframe,
-     * so enabling it can queue ~1600 events in that window against a 4 KB
-     * buffer, overflowing it and wedging the controller. Keeping the set
-     * minimal keeps the buffer shallow.
+     * DEVTEN gates whether device events are written to the buffer at all; it
+     * is not an interrupt mask. Only the events acted on are enabled:
+     * dwc3_gadget_enable_irq() also enables EOPF
+     * (drivers/usb/dwc3/gadget.c:1990), which fires
+     * every microframe, and nothing drains the 4 KB buffer for the up-to-200
+     * ms a dwc3_depcmd() can take.
      */
     write32(DWC3_DEVTEN,
             DWC3_DEVTEN_DISCONNEVTEN |
@@ -254,12 +214,8 @@ int dwc3_depcmd(u32 phys_ep, u32 cmd, u32 p0, u32 p1, u32 p2)
 
     write32(base + DWC3_DEPCMD, cmd | DWC3_DEPCMD_CMDACT);
 
-    /*
-     * Spin on the register directly rather than udelay()-ing between polls:
-     * udelay() itself spins on the timer, so a stuck command used to freeze
-     * here with no output at all. Ticking the heartbeat each iteration keeps
-     * the LED reporting which command is hung.
-     */
+    /* Spin on the register rather than udelay()-ing between polls, so a stuck
+     * command does not also freeze the activity indicator. */
     start = timer_ticks();
     iters = 0;
     for (;;) {
@@ -269,12 +225,7 @@ int dwc3_depcmd(u32 phys_ep, u32 cmd, u32 p0, u32 p1, u32 p2)
 
         dwc3_wait_tick();
 
-        /*
-         * Two independent bounds. The timer one is the meaningful deadline,
-         * but it is useless if the timer itself has stopped -- and a loop that
-         * cannot exit takes the debug channel with it. The iteration count is
-         * the backstop.
-         */
+        /* The iteration count is the backstop for a stopped timer. */
         if (++iters > 4000000u)
             return -1;
         if (timer_ticks() - start > DEPCMD_TIMEOUT_TICKS)
@@ -287,18 +238,6 @@ int dwc3_ep_start_config(void)
     return dwc3_depcmd(0, DWC3_DEPCMD_DEPSTARTCFG, 0, 0, 0);
 }
 
-int dwc3_set_xfer_resource_all(u32 count)
-{
-    u32 i;
-
-    for (i = 0; i < count; i++) {
-        int ret = dwc3_depcmd(i, DWC3_DEPCMD_SETTRANSFRESOURCE, 1, 0, 0);
-        if (ret)
-            return ret;
-    }
-    return 0;
-}
-
 int dwc3_ep_config(u32 phys_ep, u32 type, u32 maxpacket)
 {
     u32 p0, p1;
@@ -308,43 +247,30 @@ int dwc3_ep_config(u32 phys_ep, u32 type, u32 maxpacket)
        | DWC3_DEPCFG_MAX_PACKET_SIZE(maxpacket)
        | DWC3_DEPCFG_ACTION_INIT;
 
-    /*
-     * Burst size is SuperSpeed-only; at high speed the field stays zero.
-     *
-     * Every IN endpoint needs a TxFIFO, numbered phys_ep >> 1 -- so ep0in
-     * (physical 1) uses FIFO 0 and bulk IN (physical 3) uses FIFO 1. OUT
-     * endpoints share the single RxFIFO and the field is ignored.
-     */
+    /* Every IN endpoint needs a TxFIFO, numbered phys_ep >> 1. OUT endpoints
+     * share the single RxFIFO and the field is ignored. */
     if (phys_ep & 1)
         p0 |= DWC3_DEPCFG_FIFO_NUMBER(phys_ep >> 1);
 
-    /*
-     * EP_NUMBER is the PHYSICAL endpoint number. Passing a logical number
-     * here makes two endpoints claim the same identity and the controller
-     * simply stops responding -- which looks exactly like a dead ep0.
-     */
+    /* EP_NUMBER is the PHYSICAL endpoint number. */
     p1 = DWC3_DEPCFG_EP_NUMBER(phys_ep) | DWC3_DEPCFG_INT_NUM(0);
 
     if (type == DWC3_DEPCMD_TYPE_CONTROL) {
         /* ep0 is driven by XferNotReady telling us which phase is wanted. */
         p1 |= DWC3_DEPCFG_XFER_COMPLETE_EN | DWC3_DEPCFG_XFER_NOT_READY_EN;
     } else {
-        /* Single-TRB bulk transfers with IOC|LST: completion is what we act
-         * on, and InProgress matches what upstream enables for non-control. */
+        /* Single-TRB transfers with IOC|LST; InProgress matches what
+         * dwc3_gadget_set_ep_config() enables for a non-control endpoint
+         * (drivers/usb/dwc3/gadget.c:602). */
         p1 |= DWC3_DEPCFG_XFER_COMPLETE_EN | DWC3_DEPCFG_XFER_IN_PROGRESS_EN;
     }
 
     /*
-     * DEPCFG then SETTRANSFRESOURCE, per endpoint, at the point the endpoint
-     * is actually configured.
-     *
-     * Upstream instead issues SETTRANSFRESOURCE for every endpoint in one
-     * batch from dwc3_gadget_start_config(), and this file briefly did the
-     * same -- but that hands a transfer resource to endpoints 2 and 3 while
-     * they are still unconfigured and absent from DALEPENA, and ep0 stopped
-     * being delivered SETUPs from that point on. Upstream gets away with it
-     * because it has allocated and initialised every hardware endpoint before
-     * that loop runs; we have not.
+     * SETTRANSFRESOURCE per endpoint, at configure time, rather than the batch
+     * over all endpoints that dwc3_gadget_start_config() issues after
+     * DEPSTARTCFG
+     * (drivers/usb/dwc3/gadget.c:540): a resource handed to an endpoint still
+     * absent from DALEPENA stops ep0 being delivered SETUPs.
      */
     ret = dwc3_depcmd(phys_ep, DWC3_DEPCMD_SETEPCONFIG, p0, p1, 0);
     if (ret)
@@ -403,11 +329,8 @@ void dwc3_set_address(u32 addr)
 }
 
 /*
- * Event buffer consumer.
- *
- * GEVNTCOUNT holds the number of BYTES of valid events. We read one 32-bit
- * event, then acknowledge exactly 4 bytes. The buffer is a hardware ring, so
- * the read position wraps independently of the count.
+ * GEVNTCOUNT is a byte count. The buffer is a hardware ring, so the read
+ * position wraps independently of it.
  */
 static u32 evt_lpos;
 

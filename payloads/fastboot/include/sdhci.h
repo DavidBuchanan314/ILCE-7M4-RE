@@ -5,24 +5,13 @@
 
 /*
  * eMMC via the Arasan SD Host Controller.
+ * arch/arm64/boot/dts/cxd/cxd90057.dtsi:768 declares
+ * `emmc0 { compatible = "arasan,sdhci"; }`; Host Controller Version (0xFE)
+ * reads 0x1004, spec 4.00.
  *
- * cxd90057.dtsi declares `emmc0 { compatible = "arasan,sdhci"; }`, so this is
- * a standard SDHCI part rather than a vendor design, and BOOT.md places the
- * host at 0xF10D6000. Both were confirmed by reading the live controller:
- * Host Controller Version (0xFE) = 0x1004, i.e. spec 4.00.
- *
- * We do NOT initialise the controller. By the time a serial-boot payload runs
- * the ROM has already brought the eMMC up, which a register dump confirms:
- *
- *   0x24 Present State  01ff00f0  card inserted, CMD/DAT idle
- *   0x28 Host Control   24        8-bit bus, high speed
- *   0x29 Power Control  0f        bus power on, 3.3 V
- *   0x2C Clock Control  0007      internal clock stable, SD clock enabled
- *
- * So this driver only has to issue commands. Transfers use PIO rather than
- * SDMA/ADMA: the ROM's own reader uses 0xFE030008 as scratch, which lands
- * inside our .usbdma arena, and PIO avoids both that collision and any
- * question about DMA coherency.
+ * The controller is left as the ROM set it up -- bus powered, 8-bit, high
+ * speed, clock stable -- so this only has to issue commands. Transfers are
+ * PIO, which sidesteps DMA coherency entirely.
  */
 
 #define SDHCI_BASE              0xF10D6000ull
@@ -46,18 +35,16 @@
 #define SDHCI_CAPABILITIES      (SDHCI_BASE + 0x40)
 #define SDHCI_HOST_VERSION      (SDHCI_BASE + 0xFE)   /* 16-bit */
 
-/* Clock Control. Card identification must run at <= 400 kHz; the controller is
- * left clocked for data transfer by the ROM, which is why CMD2/CMD3 time out
- * until the divider is applied. */
+/* Card identification must run at <= 400 kHz; the ROM leaves the controller
+ * clocked for data transfer. */
 #define SDHCI_CLK_INT_EN        BIT(0)
 #define SDHCI_CLK_INT_STABLE    BIT(1)
 #define SDHCI_CLK_SD_EN         BIT(2)
 #define SDHCI_CLK_DIV_SHIFT     8
 #define SDHCI_CLK_DIV_HI_SHIFT  6
 
-/* Software Reset. Resetting CMD+DAT after an error is mandatory: the
- * controller latches the failure and refuses further commands until the lines
- * are reset, so without it one bad command wedges the host for good. */
+/* The controller latches a failure and refuses further commands until CMD+DAT
+ * are reset. */
 #define SDHCI_RESET_ALL         BIT(0)
 #define SDHCI_RESET_CMD         BIT(1)
 #define SDHCI_RESET_DATA        BIT(2)
@@ -100,18 +87,13 @@
 #define MMC_CMD_WRITE_MULTIPLE_BLOCK 25
 
 /*
- * R1 card status, as returned by CMD13 SEND_STATUS and by every R1 command.
+ * R1 card status. Transfer Complete only means the last block reached the bus;
+ * a programming failure -- write-protected partition, out-of-range address --
+ * surfaces only in the NEXT status response, so the write path polls CMD13.
  *
- * A write is the first operation here whose failure the controller may not
- * report: the host sees Transfer Complete as soon as the last block is on the
- * bus, and the card then programs it privately. Anything that goes wrong
- * during programming -- a write-protected boot partition, an out-of-range
- * address -- surfaces only as an error bit in the NEXT status response. So the
- * write path polls CMD13 and checks these rather than trusting the interrupt.
- *
- * ERROR_MASK is every sticky error bit in the status word: 31..26 address and
- * erase faults plus WP_VIOLATION, 24 lock/unlock, 23..19 CRC/illegal/ECC/CC/
- * internal, 16 CID-CSD overwrite, 15 WP erase skip, 7 switch error.
+ * ERROR_MASK covers every sticky error bit: 31..26 address and erase faults
+ * plus WP_VIOLATION, 24 lock/unlock, 23..19 CRC/illegal/ECC/CC/internal,
+ * 16 CID-CSD overwrite, 15 WP erase skip, 7 switch error.
  */
 #define MMC_R1_ERROR_MASK           0xFDF98080u
 #define MMC_R1_WP_VIOLATION         BIT(26)
@@ -123,12 +105,10 @@
  * EXT_CSD[179] PARTITION_CONFIG, low 3 bits = PARTITION_ACCESS:
  *   0 user area, 1 boot0, 2 boot1, 3 RPMB, 4..7 GP1..GP4
  *
- * The CMD6 argument is (ACCESS_MODE << 24) | (INDEX << 16) | (VALUE << 8),
- * with ACCESS_MODE 1 = set bits, 2 = clear bits, 3 = write byte. We clear the
- * field then set it rather than writing the whole byte, because
- * PARTITION_CONFIG also holds BOOT_PARTITION_ENABLE and BOOT_ACK, which a
- * blind write-byte would destroy. This is exactly what the ROM does -- its
- * observed argument is 0x02B30700.
+ * CMD6 argument is (ACCESS_MODE << 24) | (INDEX << 16) | (VALUE << 8), with
+ * ACCESS_MODE 1 = set bits, 2 = clear bits, 3 = write byte. PARTITION_CONFIG
+ * also holds BOOT_PARTITION_ENABLE and BOOT_ACK, so the field is cleared and
+ * set rather than written as a byte.
  */
 #define EXT_CSD_BUS_WIDTH           183
 #define EXT_CSD_HS_TIMING           185
@@ -158,20 +138,13 @@ extern u16 mmc_last_error;
 /* Last R1 card status seen by mmc_wait_ready(), for diagnostics. */
 extern u32 mmc_last_r1;
 
-/*
- * Issue one raw command and hand back the 48-bit response. Exposed so the
- * card can be probed interactively over fastboot rather than by rebuilding
- * for each experiment.
- */
+/* One raw command, with the 48-bit response. */
 int mmc_raw_cmd(u8 index, u32 arg, u16 flags, u32 *resp);
 
 /*
- * Full card identification: CMD0 -> CMD1 (poll) -> CMD2 -> CMD3 -> CMD7, run
- * at ~400 kHz and then restored to the original clock.
- *
- * Needed because the payload does NOT inherit an initialised card on this boot
- * path -- the ROM is diverted before identification, and its own "init" is
- * only CMD5 SLEEP_AWAKE against an RCA that was never assigned.
+ * Full identification: CMD0 -> CMD1 (poll) -> CMD2 -> CMD3 -> CMD7 at
+ * ~400 kHz, then back to the original clock. The ROM is diverted before it
+ * identifies the card, so the payload does not inherit one.
  */
 int mmc_init(void);
 

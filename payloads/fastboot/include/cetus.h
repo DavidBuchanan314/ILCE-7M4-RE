@@ -21,10 +21,7 @@
 /* Where the bundled CP payload is staged and entered. */
 #define CETUS_PAYLOAD_BASE  0xFE020000u
 
-/*
- * Scratch in CP eSRAM, past the payload's code and its mailbox, used to hand
- * over text too long to ride in a command frame.
- */
+/* CP scratch, past the payload's code and mailbox: text too long for a frame. */
 #define CETUS_TEXT_BUF      0xFE031000u
 
 void cetus_spi_init(void);
@@ -33,7 +30,8 @@ void cetus_spi_init(void);
 int cetus_set_rate(u32 sel, u32 cpsdvsr, u32 scr);
 u32 cetus_rate_khz(void);
 
-/* Only safe once our payload is answering; see cetus.c. */
+/* Only safe once our payload is answering: the ROM's sender waits for an idle
+ * bus and a master that keeps frames back to back starves it. */
 void cetus_set_pipelined(int on);
 
 /* Resets the CP into SPI-COM boot mode, where its mask ROM runs the monitor. */
@@ -49,13 +47,10 @@ int cetus_read(u32 addr, u8 *buf, u32 len, u32 width);
 int cetus_write(u32 addr, const u8 *buf, u32 len, u32 width);
 
 /* Answers before handing over. The ROM's monitor is gone once it does; the
- * payload in payloads/cetus puts an equivalent one back on the same link. */
+ * payload under cetus/ puts an equivalent one back on the same link. */
 int cetus_entry(u32 addr);
 
-/*
- * Served by that payload, not by the ROM. The flash is only reachable from
- * code running on the CP, so these are how the AP sees it at all.
- */
+/* Served by that payload, not the ROM: the flash is only reachable from the CP. */
 int cetus_nor_read(u32 offset, u8 *buf, u32 len);
 int cetus_nor_id(u32 *id);
 
@@ -65,10 +60,7 @@ int cetus_println(const char *s);
 /* One flash command, up to 8 bytes back. Issues exactly the opcode given. */
 int cetus_nor_cmd(u8 op, u8 dummy, u8 nbytes, u32 addr, int use_addr, u8 *out);
 
-/*
- * Push the bundled payload to the CP and enter it. Done during init, so the
- * flash commands work without anything being staged by hand.
- */
+/* Push the bundled payload to the CP and enter it. */
 int cetus_payload_start(void);
 
 /* Result of the last cetus_bring_up(), for reporting. 0 = payload running. */

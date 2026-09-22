@@ -23,9 +23,8 @@
 
 /*
  * The controller's I/O mode is not in the controller. Bits 4 and 5 of SCU
- * 0x210 select it, and nothing in a warm reset puts them back: whatever mode
- * the CP's firmware left the part in survives into a monitor boot, which is
- * why a bare controller init reads nothing but 0xFF.
+ * 0x210 select it, and nothing in a warm reset puts them back, so whatever
+ * mode the CP's firmware left the part in survives into a monitor boot.
  */
 #define SCU_BASE            0xF1388000ull
 #define SCU_OSPI_MODE_STS   (SCU_BASE + 0x210)
@@ -34,10 +33,9 @@
 #define SCU_OSPI_MODE_BITS  (BIT(4) | BIT(5))
 
 /*
- * The ROM sets this to 1 in its NOR boot path, immediately before bringing
- * the controller up, and then waits. Nothing else in the path touches the
- * flash, and a monitor boot never reaches this code -- which is why a payload
- * that only programs the controller reads nothing but 0xFF.
+ * The ROM sets this to 1 in its NOR boot path, immediately before bringing the
+ * controller up, and then waits. A monitor boot never runs that path, so
+ * without this and the mode bits above the flash reads nothing but 0xFF.
  */
 #define SCU_NOR_ENABLE      (SCU_BASE + 0xF20)
 
@@ -79,12 +77,7 @@
 #define DELAY_VAL       0x06060303u
 #define RDDATACAP_VAL   0x21u
 
-/*
- * Nothing on this processor keeps time for us -- the ROM's timers are not set
- * up in a payload -- so waits are bounded by iteration count. The controller
- * answers a register-level poll in well under a microsecond, so these are
- * enormous compared to the operations they guard.
- */
+/* No timer is set up in a payload, so waits are bounded by iteration count. */
 #define POLL_LIMIT      20000u
 
 static int wait_idle(void)
@@ -104,10 +97,8 @@ static void controller_disable(void)
 }
 
 /*
- * Every value below is the state the ROM's own bring-up leaves behind, read
- * back off the controller after it has successfully initialised. Reproducing
- * it exactly is the point: the ROM boots this flash from an arbitrary prior
- * state, so its register set is the known-good one.
+ * Read back off the controller after the ROM's own bring-up: a known-good
+ * register set for booting this flash from an arbitrary prior state.
  */
 #define OSPI_DMAPER         (OSPI_BASE + 0x20)
 #define OSPI_MODEBIT        (OSPI_BASE + 0x28)
@@ -230,11 +221,8 @@ int ospi_indirect_read(u32 offset, u64 dst, u32 len)
     write32(OSPI_INDRD, INDRD_START);
     dsb();
 
-    /*
-     * Drain as the controller fills, so a transfer may be longer than its
-     * SRAM. Waiting for the whole length to land first would deadlock on
-     * anything bigger than the partition.
-     */
+    /* Drain as it fills, so a transfer may be longer than the controller's
+     * SRAM. */
     while (got < len) {
         u32 fill = read32(OSPI_SRAMFILL) & 0xFFFF;
 

@@ -4,17 +4,16 @@
 #include "led.h"
 #include "fastboot.h"
 #include "io.h"
+#include "log.h"
 #include "timer.h"
 
 /*
  * Minimal USB 2.0 device: one configuration, one vendor interface, two bulk
- * endpoints. Enough to be a fastboot target.
+ * endpoints.
  *
- * The ep0 state machine is driven by XferNotReady events rather than by
- * assuming the phase order, which is how dwc3_ep0.c upstream does it. The
- * controller tells us when it wants the data stage and when it wants the
- * status stage, and which physical endpoint to queue each on -- so we never
- * have to work out the direction ourselves.
+ * ep0 is driven by XferNotReady rather than by assuming the phase order: the
+ * controller says which phase it wants and which physical endpoint to queue
+ * it on.
  */
 
 #define EP0_OUT     DWC3_PHYS_EP(0, 0)   /* 0 */
@@ -80,8 +79,7 @@ static const u8 config_desc[32] = {
     0,
 };
 
-/* Required when bcdUSB >= 0x0200. We are high-speed-only, so the "other
- * speed" it describes is full speed with no endpoints worth listing. */
+/* Required when bcdUSB >= 0x0200. */
 static const u8 qualifier_desc[10] = {
     10, USB_DT_DEVICE_QUALIFIER,
     0x00, 0x02,
@@ -91,11 +89,6 @@ static const u8 qualifier_desc[10] = {
     0,                      /* reserved */
 };
 
-/*
- * String descriptors. bLength counts the header plus the UTF-16LE payload
- * and nothing else -- an earlier version padded these arrays with spare
- * 0,0 pairs, which silently appended NUL characters to each string.
- */
 static const u8 str_langid[4] = { 4, USB_DT_STRING, 0x09, 0x04 };
 
 /* "Sony" */
@@ -120,12 +113,8 @@ static const u8 str_serial[34] = {
 /* ---- ep0 state ---------------------------------------------------------- */
 
 /*
- * Which phase the single ep0 TRB is currently servicing. Tracked explicitly
- * rather than inferred from the TRB's control field: one TRB is reused for
- * setup, data and status, and the completion handler has to know which of the
- * three just finished in order to decide what comes next. Getting this wrong
- * means enumeration stops dead after the first control transfer, because
- * nothing re-arms the SETUP.
+ * One TRB is reused for all three phases, so the completion handler has to be
+ * told which one it is finishing.
  */
 enum ep0_phase {
     EP0_PHASE_SETUP,
@@ -140,13 +129,10 @@ static volatile int bulk_out_busy, bulk_in_busy;
 static volatile u32 bulk_out_residue, bulk_in_residue;
 
 /*
- * Incremented on every bus reset. A reset makes ep0_init() issue DEPSTARTCFG
- * with param 0, which releases the transfer resources of EVERY endpoint --
- * silently killing any bulk transfer already queued. The host does this on
- * every fastboot command (it resets the device when claiming the interface),
- * so an outstanding bulk transfer being torn out from under us is the normal
- * case, not an error. The bulk helpers compare this across their wait loop and
- * re-queue when it moves.
+ * Incremented on every bus reset, which releases the transfer resources of
+ * every endpoint and so kills any queued bulk transfer. The host resets on
+ * every fastboot command, so that is the normal case; the bulk helpers watch
+ * this across their wait loop and re-queue when it moves.
  */
 static volatile u32 bulk_epoch;
 
@@ -160,16 +146,10 @@ static volatile int configured;
 
 static u16 get_le16(const u8 *p) { return (u16)(p[0] | (p[1] << 8)); }
 
-
-
-
-
-
-
-
-
 static void ep0_queue_setup(void)
 {
+    int ret;
+
     ep0_trb.bpl  = (u32)(unsigned long)setup_buf;
     ep0_trb.bph  = (u32)((u64)(unsigned long)setup_buf >> 32);
     ep0_trb.size = 8;
@@ -180,19 +160,21 @@ static void ep0_queue_setup(void)
                  | DWC3_TRB_CTRL_ISP_IMI;
     ep0_phase = EP0_PHASE_SETUP;
     dma_wmb();
-    usb_state = dwc3_ep_start_xfer(EP0_OUT, (u64)(unsigned long)&ep0_trb, 0)
-              ? EP0_TRACE_ARM_FAILED : EP0_TRACE_ARMED;
+
+    /* Nothing re-arms ep0 after this, so the device is deaf from here on.
+     * Logging blocks on the CP link, which is acceptable on a path that ends
+     * the session anyway. */
+    ret = dwc3_ep_start_xfer(EP0_OUT, (u64)(unsigned long)&ep0_trb, 0);
+    if (ret)
+        mira_logx("ep0 SETUP arm failed, depcmd", (u64)(u32)ret);
 }
 
 static void ep0_queue_data(u32 phys_ep, const void *buf, u32 len)
 {
     u32 xfer = len;
 
-    /*
-     * An OUT transfer length must be a multiple of the endpoint's maximum
-     * packet size, or the controller reports a babble/short error. Round up:
-     * the buffer is large enough and the surplus is discarded.
-     */
+    /* An OUT length must be a whole number of maximum-size packets; the
+     * surplus is discarded. */
     if (!(phys_ep & 1))
         xfer = (len + EP0_MAXPACKET - 1) & ~(u32)(EP0_MAXPACKET - 1);
 
@@ -205,7 +187,6 @@ static void ep0_queue_data(u32 phys_ep, const void *buf, u32 len)
                  | DWC3_TRB_CTRL_IOC
                  | DWC3_TRB_CTRL_ISP_IMI;
     ep0_phase = EP0_PHASE_DATA;
-    usb_state = EP0_TRACE_DATA_QUEUED;
     dma_wmb();
     dwc3_ep_start_xfer(phys_ep, (u64)(unsigned long)&ep0_trb, 0);
 }
@@ -222,7 +203,6 @@ static void ep0_queue_status(u32 phys_ep, int three_stage)
                  | DWC3_TRB_CTRL_IOC
                  | DWC3_TRB_CTRL_ISP_IMI;
     ep0_phase = EP0_PHASE_STATUS;
-    usb_state = EP0_TRACE_STATUS_QUEUED;
     dma_wmb();
     dwc3_ep_start_xfer(phys_ep, (u64)(unsigned long)&ep0_trb, 0);
 }
@@ -239,25 +219,16 @@ static void bulk_endpoints_enable(void)
 {
     int ret;
 
-    /*
-     * No DEPSTARTCFG here. Transfer resources were assigned once when ep0 came
-     * up; re-running DEPSTARTCFG now would reset them and kill the control
-     * endpoint mid-session. Enabling a non-ep0 endpoint is just DEPCFG plus
-     * DALEPENA.
-     */
-    usb_state = USB_STATE_CFG_OUT_ISSUING;
+    /* No DEPSTARTCFG: it would reset the resources ep0 is already holding. */
     ret = dwc3_ep_config(EP_OUT, DWC3_DEPCMD_TYPE_BULK, BULK_MAXPACKET);
     if (ret) {
         usb_bulk_error = USB_BULK_ERR_CFG_OUT;
-        usb_state = USB_STATE_CFG_OUT_FAILED;
         return;
     }
 
-    usb_state = USB_STATE_CFG_IN_ISSUING;
     ret = dwc3_ep_config(EP_IN, DWC3_DEPCMD_TYPE_BULK, BULK_MAXPACKET);
     if (ret) {
         usb_bulk_error = USB_BULK_ERR_CFG_IN;
-        usb_state = USB_STATE_CFG_IN_FAILED;
         return;
     }
 
@@ -321,17 +292,11 @@ static int handle_setup(void)
 
     case USB_REQ_SET_CONFIGURATION:
         if ((ctrl.wValue & 0xff) == 1) {
-            /*
-             * Do NOT configure the bulk endpoints here. This runs inside the
-             * SETUP stage of the control transfer, and an endpoint command
-             * that stalls the controller's command interface at this point
-             * also prevents ep0 from arming its next SETUP -- taking the whole
-             * device down, debug channel included. Defer it to the main loop,
-             * after this transfer has finished cleanly.
-             */
+            /* Deferred to the main loop: an endpoint command issued inside
+             * the SETUP stage can stall the command interface and stop ep0
+             * re-arming. */
             configured = 1;
             bulk_enable_pending = 1;
-            usb_state = USB_STATE_IN_SET_CONFIG;
             return 0;
         }
         if ((ctrl.wValue & 0xff) == 0) {
@@ -377,8 +342,7 @@ static int ep0_init(void)
 {
     int ret;
 
-    /* Once per bus reset: reset the controller's resource assignment. Each
-     * endpoint then claims its own resource as part of being configured. */
+    /* Once per bus reset; each endpoint then claims its resource at DEPCFG. */
     ret = dwc3_ep_start_config();
     if (ret)
         return ret;
@@ -399,7 +363,8 @@ static int ep0_init(void)
 
 static void on_reset(void)
 {
-    usb_state = USB_STATE_IN_RESET;
+    int ret;
+
     configured = 0;
 
     /*
@@ -414,13 +379,12 @@ static void on_reset(void)
 
     dwc3_set_address(0);
 
-    /*
-     * ep0_init()'s result used to be discarded here. If it fails after a bus
-     * reset the control endpoint never re-arms a SETUP, so the device silently
-     * stops answering while the event loop carries on looking healthy.
-     */
-    if (ep0_init() != 0)
-        usb_state = USB_STATE_RESET_EP0_FAIL;
+    /* Without a re-armed SETUP the device goes silently deaf while the event
+     * loop carries on looking healthy, so this is worth a line even though
+     * the CP link is slow. */
+    ret = ep0_init();
+    if (ret)
+        mira_logx("ep0 init failed after bus reset, depcmd", (u64)(u32)ret);
 }
 
 static void handle_depevt(u32 event)
@@ -430,24 +394,11 @@ static void handle_depevt(u32 event)
     u32 status = DEPEVT_STATUS(event);
 
     if (ep == EP_OUT || ep == EP_IN) {
-        /*
-         * Accept either completion flavour.
-         *
-         * With XFER_IN_PROGRESS_EN set, this core reports a finished TRB that
-         * had IOC as XferInProgress rather than XferComplete -- which is why
-         * dwc3_gadget.c routes DWC3_DEPEVT_XFERINPROGRESS into
-         * dwc3_endpoint_transfer_complete() for non-control endpoints. Waiting
-         * only on XferComplete spins forever on an event that never comes.
-         * Handling both is correct regardless of which one the core picks.
-         */
+        /* With XFER_IN_PROGRESS_EN set this core may report a finished TRB as
+         * XferInProgress rather than XferComplete. */
         if (type == DWC3_DEPEVT_XFERCOMPLETE ||
             type == DWC3_DEPEVT_XFERINPROGRESS) {
-            /*
-             * TRB.size holds the RESIDUE -- how much of the requested length
-             * was not transferred -- so the actual count is requested minus
-             * this. For a short OUT packet that is how we learn the real
-             * length of a fastboot command.
-             */
+            /* TRB.size is the residue, not the count. */
             if (ep == EP_OUT) {
                 bulk_out_residue = bulk_trb[0].size & DWC3_TRB_SIZE_MASK;
                 bulk_out_busy = 0;
@@ -474,7 +425,6 @@ static void handle_depevt(u32 event)
             ctrl.wIndex       = get_le16(&setup_buf[4]);
             ctrl.wLength      = get_le16(&setup_buf[6]);
 
-            usb_state = EP0_TRACE_GOT_SETUP;
             if (handle_setup() < 0)
                 ep0_stall();
             /* Otherwise wait: the controller raises XferNotReady when it
@@ -486,7 +436,7 @@ static void handle_depevt(u32 event)
             break;
 
         case EP0_PHASE_STATUS:
-            /* Transfer finished. Re-arm so a SETUP is always outstanding. */
+            /* Re-arm, so a SETUP is always outstanding. */
             ep0_queue_setup();
             break;
         }
@@ -521,8 +471,7 @@ static void handle_devt(u32 event)
         on_reset();
         break;
     case DWC3_DEVICE_EVENT_CONNECT_DONE:
-        /* Speed is fixed high by DCFG; nothing to renegotiate. Re-arm ep0
-         * so a SETUP is always outstanding. */
+        /* Speed is fixed high by DCFG; nothing to renegotiate. */
         ep0_init();
         break;
     case DWC3_DEVICE_EVENT_DISCONNECT:
@@ -538,9 +487,6 @@ int usb_gadget_init(void)
     return ep0_init();
 }
 
-/* Coarse "how far did we get" marker, reported by the LED heartbeat. */
-volatile u32 usb_state = USB_STATE_UNCONFIGURED;
-
 /* Lets the activity light go out while dwc3_depcmd() waits on the controller. */
 void dwc3_wait_tick(void)
 {
@@ -554,9 +500,8 @@ void usb_event_pump(void)
 
     led_activity_tick();
 
-    /* Drain rather than taking one event per call: the buffer is only 4 KB and
-     * nothing consumes it while an endpoint command is waiting. The budget
-     * stops a flood from starving the heartbeat. */
+    /* Drain: nothing consumes the 4 KB buffer while an endpoint command
+     * waits. The budget stops a flood starving the activity indicator. */
     while (budget-- > 0) {
         event = dwc3_event_poll();
         if (!event)
@@ -576,27 +521,20 @@ int usb_is_configured(void)
     return configured;
 }
 
-/*
- * Perform any deferred bulk endpoint setup. Called from the main loop, outside
- * any control transfer, so a failure here cannot strand ep0 mid-transaction.
- */
+/* Called from the main loop, outside any control transfer, so a failure here
+ * cannot strand ep0 mid-transaction. */
 void usb_bulk_enable_pending(void)
 {
     if (!bulk_enable_pending)
         return;
     bulk_enable_pending = 0;
-    usb_state = USB_STATE_ENABLING_BULK;
     bulk_endpoints_enable();
-    if (!usb_bulk_error)
-        usb_state = USB_STATE_CONFIGURED;
 }
 
 /* ---- bulk transfers ----------------------------------------------------- */
 
 /* Set when an endpoint command during SET_CONFIGURATION was rejected, or when
- * a bulk transfer could not be started / never completed. Reported by
- * fastboot_loop() via the LED, because a wedged bulk path is otherwise
- * indistinguishable from a hang. */
+ * a bulk transfer could not be started or never completed. */
 int usb_bulk_error;
 
 /* Resource index per direction, so a queued transfer can be ended later. */
@@ -620,46 +558,30 @@ static int bulk_queue(u32 phys_ep, const void *buf, u32 len, int is_in)
 }
 
 /*
- * Applied ONLY to transfers the host has already committed to. Receiving is
- * not one of them: usb_bulk_recv() is how we wait for the host to send a
- * fastboot command, and that wait is open-ended -- the host may sit idle
- * indefinitely before anyone runs a command. Timing it out treated normal
- * idling as a failure and halted the device, so every later command NAKed
- * forever.
+ * Applied only to transfers the host has committed to. usb_bulk_recv() is not
+ * one: waiting for a command is open-ended.
  *
- * Half a second is the deadline a host that is genuinely reading will never
- * come near -- a 64-byte reply lands in microseconds and even a full upload
- * chunk is a couple of milliseconds -- while being what a host that has gone
- * away costs us before the endpoint is reclaimed. The slack is for the host
- * stalling between reads of a long upload, not for the transfer itself.
+ * Half a second is far past any real transfer -- a 64-byte reply lands in
+ * microseconds, a full upload chunk in milliseconds -- and is slack for a host
+ * stalling between reads of a long upload.
  */
 #define BULK_TIMEOUT_TICKS  (TIMER0_HZ / 2)
 
 u32 usb_bulk_recv(void *buf, u32 len)
 {
-    /*
-     * An OUT transfer length must be a whole number of maximum-size packets;
-     * the controller rejects anything else. A short packet from the host ends
-     * the transfer early and the residue tells us how much actually arrived.
-     */
+    /* A short packet from the host ends the transfer early, and the residue
+     * gives the count. */
     u32 xfer = (len + BULK_MAXPACKET - 1) & ~(u32)(BULK_MAXPACKET - 1);
 
     for (;;) {
         u32 epoch;
 
-        if (!configured) {
-            /* Distinguish "never configured" from "reset, awaiting
-             * re-configuration" -- they look identical otherwise. */
-            if (usb_state != USB_STATE_RESET_EP0_FAIL)
-                usb_state = USB_STATE_WAIT_RECONFIG;
-            while (!configured)
-                usb_event_pump();
-        }
+        while (!configured)
+            usb_event_pump();
 
         epoch = bulk_epoch;
         bulk_out_residue = 0;
         bulk_out_busy = 1;
-        usb_state = USB_STATE_AWAIT_CMD;
 
         if (bulk_queue(EP_OUT, buf, xfer, 0) != 0) {
             usb_bulk_error = USB_BULK_ERR_OUT_CMD;
@@ -667,27 +589,21 @@ u32 usb_bulk_recv(void *buf, u32 len)
         }
 
         /* No deadline: waiting for the host is the normal state. */
-        usb_state = USB_STATE_BULK_WAIT_OUT;
         while (bulk_out_busy && bulk_epoch == epoch)
             usb_event_pump();
 
-        /* Reset mid-flight: the transfer is void, wait to be reconfigured
-         * and queue it again. */
+        /* Reset mid-flight: the transfer is void. */
         if (bulk_epoch != epoch)
             continue;
 
         dsb();
-        usb_state = USB_STATE_GOT_CMD;
         return xfer - bulk_out_residue;
     }
 }
 
 /*
- * Cancel anything queued on the bulk endpoints.
- *
- * A transfer left queued does not stay harmless: it completes whenever the
- * host next reads, delivering a reply to a command nobody asked for, and from
- * then on every answer is one behind.
+ * A transfer left queued completes on the host's next read, and from then on
+ * every answer is one behind.
  */
 void usb_bulk_abort(void)
 {
@@ -701,11 +617,8 @@ void usb_bulk_abort(void)
     }
 }
 
-/*
- * A host that stops reading mid-reply -- interrupted, killed, or piped into
- * something that closed early -- is a client problem, not a device one, so it
- * costs one aborted transfer rather than the session.
- */
+/* A host that stopped reading mid-reply costs one aborted transfer, not the
+ * session. */
 int usb_bulk_recover(void)
 {
     if (usb_bulk_error != USB_BULK_ERR_IN_TIMEOUT)
@@ -713,15 +626,13 @@ int usb_bulk_recover(void)
 
     usb_bulk_abort();
     usb_bulk_error = 0;
-    usb_state = USB_STATE_FB_LOOP_TOP;
     return 0;
 }
 
 u32 usb_bulk_send(const void *buf, u32 len)
 {
-    /* Once the host has stopped listening, the rest of this reply is going
-     * nowhere; spending the full deadline per line would turn one dropped
-     * response into minutes of stalling. */
+    /* Once the host has stopped listening, do not spend the deadline per
+     * line of a multi-line reply. */
     if (usb_bulk_error)
         return 0;
 
@@ -740,7 +651,6 @@ u32 usb_bulk_send(const void *buf, u32 len)
             return 0;
         }
 
-        usb_state = USB_STATE_BULK_WAIT_IN;
         start = timer_ticks();
         while (bulk_in_busy && bulk_epoch == epoch) {
             usb_event_pump();
@@ -751,24 +661,18 @@ u32 usb_bulk_send(const void *buf, u32 len)
             }
         }
 
-        /*
-         * A reset between receiving a command and answering it means the host
-         * is no longer listening for that answer. Drop it rather than retry:
-         * re-sending a stale reply desynchronises the command/response
-         * lockstep the protocol depends on.
-         */
+        /* A reset between command and answer means the host is no longer
+         * listening for it. Re-sending would desynchronise the
+         * command/response lockstep. */
         if (bulk_epoch != epoch)
             return 0;
 
-        usb_state = USB_STATE_SENT_REPLY;
         return len - bulk_in_residue;
     }
 }
 
 void usb_gadget_run(void)
 {
-    /* Wait for the host to configure us before handing over to fastboot. */
-    usb_state = USB_STATE_GADGET_WAIT;
     while (!configured)
         usb_event_pump();
 

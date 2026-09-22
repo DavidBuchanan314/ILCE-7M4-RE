@@ -4,14 +4,9 @@
 #include "io.h"
 
 /*
- * Synopsys DWC3 (USB 3.x dual-role controller), the stock IP -- not a Sony
- * part. Offsets below are transcribed from the camera's own kernel source,
- * drivers/usb/dwc3/core.h in Sony-ILCE-7M4-Linux, so they match this core
- * revision exactly.
- *
- * Base 0xF10C0000 from dt-bindings/soc/dwc3regs.h (USB_DWC3_REG_START, width
- * 0x11000). Linux's /proc/iomem shows the node at f10cc100 only because
- * dwc3 core.c advances the resource past the globals offset on probe.
+ * Synopsys DWC3, stock IP. Offsets from drivers/usb/dwc3/core.h (GSNPSID at
+ * :99, GEVNTADRLO at :136, the DEPCMD block at :158); base 0xF10C0000 from
+ * include/dt-bindings/soc/dwc3regs.h:31.
  */
 #define DWC3_BASE               0xF10C0000ull
 
@@ -64,16 +59,11 @@
 
 /* ---- bit definitions ---------------------------------------------------- */
 /*
- * Core identity. There are two families and they announce themselves
- * differently -- see dwc3_core_is_valid() upstream:
- *
+ * Two core families, announcing themselves differently:
  *   0x5533xxxx  "U3"  DWC_usb3,  revision in the low half of GSNPSID
  *   0x3331xxxx  "31"  DWC_usb31, revision in DWC3_VER_NUMBER instead
- *
- * The CXD90057 is the latter: usb_ssp.dtsi is titled "CXD90057 USB
- * SuperSpeedPlus" and declares maximum-speed = "super-speed-plus". Checking
- * only for "U3" rejects this core outright, which is exactly what an earlier
- * version of this file did.
+ * The CXD90057 is the latter: arch/arm64/boot/dts/cxd/usb_ssp.dtsi:55
+ * declares maximum-speed = "super-speed-plus".
  */
 #define DWC3_GSNPSID_MASK           0xffff0000
 #define DWC3_GSNPSID_DWC3           0x55330000  /* "U3" */
@@ -210,12 +200,7 @@ struct dwc3_trb {
 #define DWC3_TRBCTL_CONTROL_DATA    DWC3_TRB_CTRL_TRBCTL(5)
 
 /* ---- events ------------------------------------------------------------- */
-/*
- * Events are single 32-bit words in the event buffer. Bit 0 discriminates:
- * 0 = endpoint event, 1 = device event. Layouts mirror struct
- * dwc3_event_depevt / dwc3_event_devt upstream, decoded by hand here so the
- * payload does not depend on bitfield layout rules.
- */
+/* Single 32-bit words. Bit 0: 0 = endpoint event, 1 = device event. */
 #define DWC3_EVENT_IS_DEVT(e)       ((e) & 1u)
 
 #define DEPEVT_EP(e)                (((e) >> 1) & 0x1f)   /* physical ep */
@@ -248,9 +233,8 @@ struct dwc3_trb {
 #define DWC3_DEVICE_EVENT_OVERFLOW              11
 
 /*
- * Physical endpoint numbering: ep0out = 0, ep0in = 1, then (n<<1)|dir.
- * "dir" is 1 for IN. This is the number DEPCMD and the event `ep` field use;
- * it is not the bEndpointAddress the host sees.
+ * Physical endpoint numbering, (n << 1) | is_in -- what DEPCMD and the event
+ * `ep` field use, not the bEndpointAddress the host sees.
  */
 #define DWC3_PHYS_EP(num, is_in)    (((num) << 1) | ((is_in) ? 1 : 0))
 

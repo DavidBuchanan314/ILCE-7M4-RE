@@ -9,15 +9,9 @@ OBJDUMP := $(CROSS)objdump
 TARGET := fastboot
 BUILD  := build
 
-# -mgeneral-regs-only keeps the compiler off FP/SIMD, which would need CPACR/CPTR
-# set up before first use. Nothing here needs floating point.
-#
-# -mstrict-align is NOT optional here. We run with the MMU off, which makes
-# every data access Device-nGnRnE, and Device memory does not permit unaligned
-# accesses -- they raise an alignment fault, and with no vector table installed
-# that is an unrecoverable hang. Without this flag GCC happily merges adjacent
-# byte stores into one unaligned word store: building a packet header with
-# four byte writes became `stur w22, [sp, #49]`, which wedged the CPU solid.
+# -mgeneral-regs-only: FP/SIMD would need CPACR/CPTR set up before first use.
+# -mstrict-align: the MMU is off, so every access is Device memory, where
+# unaligned accesses fault.
 CFLAGS := -march=armv8-a -mgeneral-regs-only -mbranch-protection=none \
           -mstrict-align \
           -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-common \
@@ -27,8 +21,7 @@ CFLAGS := -march=armv8-a -mgeneral-regs-only -mbranch-protection=none \
 LDFLAGS := -T $(TARGET).ld -nostdlib -Wl,--gc-sections -Wl,-Map=$(BUILD)/$(TARGET).map \
            -Wl,--build-id=none -Wl,--no-warn-rwx-segments
 
-# The CP payload ships inside this image: built here, linked in as a blob, and
-# pushed to the co-processor during init so nothing has to be staged by hand.
+# The CP payload is built here and linked in as a blob; cetus.c pushes it.
 CETUS_DIR := cetus
 CETUS_BIN := $(CETUS_DIR)/build/cetus.bin
 CETUS_OBJ := $(BUILD)/cetus_payload.o
@@ -76,15 +69,10 @@ disasm: $(BUILD)/$(TARGET).elf
 	$(OBJDUMP) -d $<
 
 # Stage over the RP2040 serial-boot bridge. No unlock word: the ROM's challenge
-# check is bypassed by never reaching it (UNLOCK_BYPASS.md).
+# check is bypassed by never reaching it.
 #
-# The push itself only proves the records went out, so it waits for the payload
-# to say it got all the way up and fails if it does not. Everything the payload
-# logs on the way is printed, so a boot that stops early shows where.
-#
-# That log arrives over the co-processor's UART, so this can only report a
-# failure the AP survived long enough to describe -- if it dies before the CP
-# is up, the LED blip is still the only sign.
+# Waits for the payload's own ready line, which arrives over the CP's UART, so
+# a failure before the CP is up shows as a missing line and nothing more.
 PORT ?= /dev/ttyACM0
 READY ?= [mira] fastboot ready
 READY_TIMEOUT ?= 5

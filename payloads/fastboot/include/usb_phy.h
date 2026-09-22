@@ -4,24 +4,20 @@
 #include "io.h"
 
 /*
- * USB subsystem glue. Two register windows sit outside the DWC3 core itself,
- * both named in usb_ss.dtsi:
- *
- *   reg = <0xF1080000 0x1000>,   reg-names = "ss_usb"   -- PHY/subsystem cfg
- *         <0xF10A0000 0x1C000>;               "phy_cr"  -- SS PHY CR port
- *
- * We only ever touch "ss_usb". The CR port exists to load a 16 KB firmware
- * patch into the SuperSpeed PHY's SRAM, and we do not bring SuperSpeed up.
+ * USB subsystem glue, "ss_usb" in arch/arm64/boot/dts/cxd/usb_ss.dtsi:35. The
+ * other window there, "phy_cr" at 0xF10A0000, is the CR port used to load
+ * firmware into the SuperSpeed PHY's SRAM; SuperSpeed is disabled here, so it
+ * is never touched.
  */
 #define USB_SS_BASE         0xF1080000ull
 
-#define U2PHY_CFGR0         (USB_SS_BASE + 0x0000)  /* crphy_defs.h */
+#define U2PHY_CFGR0         (USB_SS_BASE + 0x0000)  /* drivers/usb/dwc3/crphy_defs.h:24 */
 #define U2PHY_CFGR1         (USB_SS_BASE + 0x0004)
-#define U31CTRL_CFGR0       (USB_SS_BASE + 0x0010)  /* cxd-phy.c:319  */
-#define U31PHY_CFGR0        (USB_SS_BASE + 0x0020)  /* cxd-phy.c:295  */
+#define U31CTRL_CFGR0       (USB_SS_BASE + 0x0010)  /* drivers/usb/dwc3/cxd-phy.c:319     */
+#define U31PHY_CFGR0        (USB_SS_BASE + 0x0020)  /* drivers/usb/dwc3/cxd-phy.c:295     */
 
-#define U31CTRL_CFGR0_U3_DISABLE    BIT(2)  /* force_u31_to_hs()   */
-#define U31CTRL_CFGR0_GEN1          BIT(3)  /* force_u31_gen1()    */
+#define U31CTRL_CFGR0_U3_DISABLE    BIT(2)  /* force_u31_to_hs(), :335 */
+#define U31CTRL_CFGR0_GEN1          BIT(3)  /* force_u31_gen1(),  :322 */
 
 #define U31PHY_CFGR0_PHY_REF        BIT(0)  /* 0 = ref clock from pad */
 #define U31PHY_CFGR0_SRAM_BYPASS    BIT(16)
@@ -56,14 +52,14 @@ enum usb_phy_status {
 
 /*
  * Bring the USB subsystem out of gate+reset and configure the USB 2.0 PHY for
- * high-speed device operation. Safe to call with USB in any state; the first
- * thing it does is assert all four resets.
+ * high-speed device operation. Safe to call with USB in any state.
  */
 int usb_phy_init(void);
 
-/* Optional TCA mux programming. Almost certainly unnecessary for the Multi
- * (micro) connector -- try without it first, and only add it if the host never
- * sees a pull-up. Separated out so it can be toggled independently. */
+/* TCA mux programming, called from dwc3_core_init()
+ * (drivers/usb/dwc3/core.c:882). A timeout is
+ * recorded rather than fatal: on a USB-2.0-only link there should be nothing
+ * for it to do. */
 int usb_phy_tca_init(void);
 
 #endif /* FASTBOOT_USB_PHY_H */

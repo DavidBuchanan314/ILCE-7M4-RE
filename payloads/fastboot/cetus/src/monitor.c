@@ -20,9 +20,8 @@ static u8 seq_next(u8 seq)
 }
 
 /*
- * Sticky: once a send has timed out the rest of the response is pointless,
- * but it still has to run to completion rather than return early, because the
- * byte count is already on the wire. The loop resynchronises afterwards.
+ * Sticky: the byte count is already on the wire, so the response still has to
+ * run to completion. The loop resynchronises afterwards.
  */
 static int res_failed;
 
@@ -103,11 +102,8 @@ static void do_download(const u8 *cmd)
     }
 
     /*
-     * Receive, then acknowledge -- the order the ROM uses and the order the
-     * master relies on. Acknowledging first looks equivalent and is not: the
-     * master sends the next frame as soon as it sees the ack, so the drain
-     * that follows swallows the frame instead of the master's polling, and
-     * the transfer stalls one frame in.
+     * Receive then acknowledge, as the ROM does: the master sends the next
+     * frame as soon as it sees the ack, and the drain would swallow it.
      */
     while (done < count) {
         u8 chunk[SPI_FRAME];
@@ -146,9 +142,8 @@ static void do_download(const u8 *cmd)
 }
 
 /*
- * Flash straight onto the wire. The window is only there to bound how much
- * has to be buffered at once -- the response is one continuous byte stream,
- * so a caller can pull the whole 64 MiB in a single command.
+ * Only bounds how much is buffered at once; the response is one continuous
+ * stream, so a caller can pull the whole part in a single command.
  */
 #define NOR_WINDOW 4096
 
@@ -177,8 +172,7 @@ static void do_nor_read(const u8 *cmd)
 
         if (ospi_indirect_read(offset + done, (u64)(unsigned long)nor_buf,
                                chunk) != 0) {
-            /* Mid stream; the length is already committed, so keep the byte
-             * count honest and let the caller notice the padding. */
+            /* The length is already committed, so pad rather than stop. */
             for (i = 0; i < chunk; i++)
                 send_res_byte(0);
         } else {
@@ -189,10 +183,8 @@ static void do_nor_read(const u8 *cmd)
     }
 }
 
-/*
- * Text is fetched from CP memory rather than carried in the frame: a frame
- * has twelve bytes spare after the header, which is not a line of log.
- */
+/* A frame has twelve bytes spare after the header, so the text is fetched
+ * from CP memory instead. */
 static void do_uart_tx(const u8 *cmd)
 {
     u32 addr = frame_get32(cmd, 8);
@@ -241,8 +233,7 @@ void monitor_loop(void)
         res_seq = RES_TAG;
         res_failed = 0;
 
-        /* Blocks until the master polls. That wait is the idle state, so it
-         * is the one place with no deadline. */
+        /* The idle state, and the one place with no deadline. */
         mbox_step(STEP_ARM1);
         spi_arm(RDY_DATA, rdy_seq);
         rdy_seq = seq_next(rdy_seq);
@@ -252,8 +243,8 @@ void monitor_loop(void)
         mbox_step(STEP_DRAIN);
         spi_drain();
 
-        /* From here the master is mid-command, so every wait has a deadline
-         * and missing one means starting the exchange over. */
+        /* From here the master is mid-command: every wait has a deadline, and
+         * missing one means starting the exchange over. */
         mbox_step(STEP_RECV);
         if (spi_recv_frame(cmd) != SPI_OK) {
             mbox_step(STEP_RECV_TMO);

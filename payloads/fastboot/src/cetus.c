@@ -3,7 +3,7 @@
 #include "scu.h"
 #include "cetus.h"
 
-/* Longest line `oem cetus println:` can carry, bounded by the command buffer. */
+/* Longest line cetus_println() can carry. */
 #define FB_TEXT_MAX 64
 
 #define SPI0_BASE       0xF1017000ull
@@ -29,13 +29,9 @@
 #define SSP_CR1_SSE     BIT(1)
 
 /*
- * SCK = SSPCLK / (CPSDVSR * (1 + SCR)).
- *
- * The CP's ROM puts its own SPI0 on the 192 MHz source, and a PL022 slave
- * wants SSPCLK at least 12x SCK, so the far end tolerates 16 MHz by the book.
- * Both sides are ours once the payload is up, so the rate is a runtime knob
- * rather than a constant -- every byte read back is checked against a known
- * image, which is what makes sweeping it safe.
+ * SCK = SSPCLK / (CPSDVSR * (1 + SCR)). The CP's SPI0 runs from a 192 MHz
+ * source and a PL022 slave needs SSPCLK at least 12x SCK, so the far end
+ * tolerates 16 MHz.
  */
 #define SSPCLK_SEL_48   0u
 #define SSPCLK_SEL_96   1u
@@ -44,12 +40,9 @@
 static const u32 sspclk_khz[] = { 48000u, 96000u, 192000u, 48000u };
 
 /*
- * 96 MHz / (2 * 3) = 16 MHz: twice the stock rate and still the 12x the
- * PL022 asks of a slave. 32 MHz reads back byte-exact too and is a further
- * ~1.35x (`oem cetus rate:2:2:2`), but that is 6x the far end's clock rather
- * than 12x, and the init-time bring-up runs at whatever this says -- being
- * out of spec there costs the CP entirely. The link dies somewhere between
- * 32 and 48 MHz.
+ * 96 MHz / (2 * 3) = 16 MHz, the fastest rate still inside the PL022's 12x.
+ * 32 MHz reads back byte-exact but is out of spec, and bring-up runs at
+ * whatever this says; the link dies between 32 and 48 MHz.
  */
 static u32 rate_sel     = SSPCLK_SEL_96;
 static u32 rate_cpsdvsr = 2u;
@@ -147,10 +140,9 @@ void cetus_monitor_boot(void)
     cetus_set_pipelined(0);
 
     /*
-     * Reprogram the controller rather than reusing it. Dropping SSE empties
-     * both FIFOs, and without that a link abandoned mid-frame keeps whatever
-     * words were in flight -- which shifts every later word by that many and
-     * makes the reset below look like it achieved nothing.
+     * Reprogram the controller rather than reusing it: dropping SSE empties
+     * both FIFOs. A link abandoned mid-frame otherwise keeps the words that
+     * were in flight, shifting every later word by that many.
      */
     spi_ready = 0;
     cetus_spi_init();
@@ -241,10 +233,8 @@ static int wait_word(u8 data, u8 tag)
 }
 
 /*
- * Each of the three tags carries its own sequence nibble, which the target
- * rolls on every word and resets at the top of a command. Tracking them is
- * what keeps a stale word -- the target repeats its last one until it has
- * another ready -- from being mistaken for the next reply.
+ * The target repeats its last word until it has another ready, so the sequence
+ * nibble is what tells a fresh reply from a stale one.
  */
 static u8 ack_seq;
 static u8 res_seq;
@@ -279,17 +269,10 @@ static int recv_ack(void)
 }
 
 /*
- * How many frames may be in flight at once.
- *
- * One is the only safe answer against the mask ROM: its sender waits for the
- * bus to go idle before queuing a word, so a master that keeps frames
- * back-to-back starves it and both ends wait forever. Our own payload queues
- * on FIFO space instead and stays ahead, so it can be clocked continuously --
- * which is worth roughly the whole round-trip poll per frame.
- *
- * The cap is the FIFO depth either way: each queued frame returns exactly one
- * word, and a receive overrun would drop a tag the caller is still waiting
- * for, which nothing recovers.
+ * Frames in flight. One against the mask ROM, whose sender waits for an idle
+ * bus and would be starved by back-to-back frames; our own payload queues on
+ * FIFO space and can be clocked continuously. The cap is the FIFO depth either
+ * way, since a receive overrun drops a tag nothing can recover.
  */
 #define SPI_FIFO_DEPTH  8
 
@@ -305,12 +288,8 @@ static int recv_bytes(u8 *out, u32 n)
     u32 i = 0, inflight = 0, start = timer_ticks();
 
     while (i < n) {
-        /*
-         * Never queue more frames than this phase still owes. Clocking past
-         * the last word would consume the start of whatever the far end
-         * sends next -- the response header, or the ready word of the command
-         * after it -- and those bytes are unrecoverable once read.
-         */
+        /* Never clock past the last word: it would consume the start of
+         * whatever the far end sends next. */
         while (inflight < rx_depth && inflight < n - i &&
                (read16(SSP_SR) & SSP_SR_TNF)) {
             write16(SSP_DR, 0);
@@ -364,11 +343,7 @@ static u32 frame_get32(const u8 *f, u32 off)
 
 static int send_command(const u8 *f, u8 *res)
 {
-    /*
-     * Start from a quiet receive FIFO. A command that gave up part way leaves
-     * its replies behind, and reading those first costs the whole of the next
-     * command before the two ends line up again.
-     */
+    /* A command that gave up part way leaves its replies behind. */
     rx_drain();
 
     if (recv_rdy() != 0)
@@ -545,10 +520,8 @@ int cetus_nor_id(u32 *id)
     return 0;
 }
 
-/*
- * The CP payload, linked in by the parent Makefile. objcopy derives these
- * names from the file it converted.
- */
+/* The CP payload, linked in by the Makefile; objcopy derives these names from
+ * the file it converted. */
 extern const u8 _binary_cetus_payload_bin_start[];
 extern const u8 _binary_cetus_payload_bin_end[];
 
@@ -577,8 +550,7 @@ int cetus_payload_start(void)
     if (rc != 0)
         return rc;
 
-    /* The payload re-arms the link itself; give it time to start serving
-     * before the next command goes out. */
+    /* Time for the payload to start serving before the next command. */
     mdelay(20);
 
     cetus_set_pipelined(1);
@@ -602,8 +574,7 @@ int cetus_println(const char *s)
     u32 len = 0, padded;
     int rc;
 
-    /* Leave room to round the length up to a word without running off the
-     * end, which a buffer size that is not a multiple of four would do. */
+    /* Room to round the length up to a word. */
     while (len < sizeof(buf) - 3 && s[len])
         len++;
     if (len == 0)

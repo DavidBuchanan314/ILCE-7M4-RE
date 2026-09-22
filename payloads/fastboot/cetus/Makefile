@@ -1,12 +1,8 @@
 # Bare-metal payload for the ILCE-7M4 co-processor (CXD90058 "Cetus").
 #
-# Not standalone: the parent fastboot payload builds this, links the result in
-# as a blob, and pushes it to the CP during its own init. Entering it replaces
-# the mask ROM's SPI monitor with one that speaks the same framing plus the
-# flash opcodes, so the AP keeps talking to the CP across the hand-off.
-#
-# Build it on its own only to check it compiles; `make` in the parent is what
-# actually produces the image that ships.
+# Not standalone: the parent payload builds this, links it in as a blob and
+# pushes it to the CP. It replaces the ROM's SPI monitor with one that speaks
+# the same framing plus the flash opcodes.
 
 CROSS   ?= aarch64-linux-gnu-
 CC      := $(CROSS)gcc
@@ -16,9 +12,8 @@ OBJDUMP := $(CROSS)objdump
 TARGET := cetus
 BUILD  := build
 
-# Same constraints as the AP payload: no FP/SIMD without setting up CPACR, and
-# -mstrict-align because with the MMU off every access is Device memory, where
-# an unaligned access faults with no vector table to catch it.
+# Same constraints as the parent: no FP/SIMD, and -mstrict-align because the
+# MMU is off.
 CFLAGS := -march=armv8-a -mgeneral-regs-only -mbranch-protection=none \
           -mstrict-align \
           -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-common \

@@ -11,9 +11,8 @@
  *   0xFE014AA4..0xFE014AB8  monitor sequence counters
  *   0xFE040000+             where a NOR boot stages the EXBL image
  *
- * Entering the monitor does not clear eSRAM, so everything below survives a
- * `cetus boot` -- which is the whole basis of the mailbox: the payload halts,
- * the AP resets the CP to get the monitor back, and then reads the results.
+ * Entering the monitor does not clear eSRAM, so the mailbox survives a reset
+ * back into it.
  */
 
 ENTRY(_start)
