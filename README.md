@@ -14,6 +14,10 @@ RE notes for ILCE-7M4, aka Sony A7 IV mirrorless camera
 
 <img width="512px" src="images/multi_breakout.jpg" />
 
+<img width="512px" src="images/multi_pinout.png" />
+
+(Note: RX on the camera goes to TX on the rp2040, and vice versa)
+
 ## Chip ID
 
 <img src="images/a7m4_chip_id.svg" />
