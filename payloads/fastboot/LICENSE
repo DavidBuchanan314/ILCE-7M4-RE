@@ -1,0 +1,4 @@
+idk. normally I just go with MIT, but this was vibecoded and is probably tainted
+by both GPL-2.0 (from linux drivers+headers, which were used as reference explicitly)
+and by various other fastboot impls - I didn't reference any explicitly
+but the LLM weights surely know about them. just remember to have fun.
